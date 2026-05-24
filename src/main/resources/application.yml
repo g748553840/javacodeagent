@@ -1,0 +1,65 @@
+spring:
+  application:
+    name: java-code-agent
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+llm:
+  provider: anthropic
+  api-key: ${LLM_API_KEY:your-api-key-here}
+  model: claude-opus-4-7
+  max-tokens: 8192
+  temperature: 0.7
+  endpoint: https://api.anthropic.com
+
+permissions:
+  default-level: SAFE
+  auto-approve:
+    - file-read
+    - glob
+    - grep
+
+memory:
+  enabled: true
+  location: ${user.home}/.java-code-agent/memory
+  index-file: MEMORY.md
+
+agents:
+  enabled: true
+  max-concurrent: 5
+
+skills:
+  enabled: true
+  location: ${user.home}/.java-code-agent/skills
+
+hooks:
+  enabled: true
+
+context:
+  compression:
+    enabled: true
+    threshold: 40
+    keep-recent: 10
+
+tasks:
+  enabled: true
+  max-concurrent: 10
+
+logging:
+  level:
+    com.javacodeagent: DEBUG
+    org.springframework.web: INFO
+
+server:
+  port: 8080
