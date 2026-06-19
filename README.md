@@ -1,4 +1,4 @@
-# Java Code Agent
+# Java Code Agent - AI Code Assistant
 
 基于 **Java 21 + Spring Boot 3.2.5 + WebFlux** 实现的 AI 编程助手，参照 Claude Code 的架构设计思路构建。
 
