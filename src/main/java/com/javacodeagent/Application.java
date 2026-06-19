@@ -8,10 +8,10 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 @SpringBootApplication
 @EnableScheduling
-public class JavaCodeAgentApplication {
+public class Application {
 
     public static void main(String[] args) {
-        SpringApplication.run(JavaCodeAgentApplication.class, args);
+        SpringApplication.run(Application.class, args);
     }
 
     @Bean

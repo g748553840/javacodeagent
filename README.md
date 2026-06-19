@@ -63,7 +63,7 @@
 ```
 javacodeagent/
 ├── src/main/java/com/javacodeagent/
-│   ├── JavaCodeAgentApplication.java      # 应用入口，@EnableScheduling
+│   ├── Application.java                   # 应用入口，@EnableScheduling
 │   ├── config/
 │   │   ├── LLMClientConfig.java           # LLM 工厂（按 provider 选实现）
 │   │   ├── LLMConfig.java                 # LLM 配置（model / apiKey / thinking）
