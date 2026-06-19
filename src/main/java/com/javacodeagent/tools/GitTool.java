@@ -1,9 +1,14 @@
 package com.javacodeagent.tools;
 
 import com.javacodeagent.core.enums.PermissionType;
+import com.javacodeagent.core.hook.HookContext;
+import com.javacodeagent.core.hook.HookManager;
+import com.javacodeagent.core.hook.HookResult;
+import com.javacodeagent.core.hook.HookType;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.Tool;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -25,7 +30,10 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class GitTool implements Tool {
+
+    private final HookManager hookManager;
 
     private static final int DEFAULT_TIMEOUT_SECONDS = 30;
 
@@ -97,7 +105,32 @@ public class GitTool implements Tool {
                 "Git command '" + command + "' is not allowed. Allowed: " + ALLOWED_COMMANDS);
         }
 
-        return runGit(normalised, args, context.getWorkingDirectory());
+        // PRE_COMMIT hook — 仅对 commit 命令触发，可拦截
+        if ("commit".equals(normalised)) {
+            HookResult preResult = hookManager.triggerHook(HookType.PRE_COMMIT, HookContext.builder()
+                .type(HookType.PRE_COMMIT)
+                .userId(context.getUserId())
+                .conversationId(context.getConversationId())
+                .data(Map.of("command", normalised, "args", args))
+                .build());
+            if (!preResult.shouldContinue()) {
+                return ToolExecutionResult.error("Commit blocked by pre-commit hook: " + preResult.getMessage());
+            }
+        }
+
+        ToolExecutionResult result = runGit(normalised, args, context.getWorkingDirectory());
+
+        // POST_COMMIT hook — 仅对成功的 commit 触发（通知型）
+        if ("commit".equals(normalised) && result.isSuccess()) {
+            hookManager.triggerHook(HookType.POST_COMMIT, HookContext.builder()
+                .type(HookType.POST_COMMIT)
+                .userId(context.getUserId())
+                .conversationId(context.getConversationId())
+                .data(Map.of("command", normalised, "args", args, "output", result.getContent() != null ? result.getContent() : ""))
+                .build());
+        }
+
+        return result;
     }
 
     private ToolExecutionResult runGit(String command, String args, Path workingDir) {

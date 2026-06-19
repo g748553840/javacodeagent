@@ -259,6 +259,14 @@ POST   /api/v1/sessions              # 创建 SSE 会话，返回 {"sessionId": 
 DELETE /api/v1/sessions/{sessionId}  # 删除会话
 ```
 
+**会话 REST（对话元数据）：**
+
+```bash
+POST   /api/v1/conversations         # 创建对话记录
+GET    /api/v1/conversations         # 列出所有对话（可选 ?userId=xxx 过滤）
+GET    /api/v1/conversations/{id}    # 查询单条对话
+```
+
 ### 任务管理
 
 ```bash
@@ -730,8 +738,8 @@ hookManager.triggerHook(PRE_TOOL_CALL, context)
 |----------|---------|------|
 | `PRE_TOOL_CALL` | `ToolManager.executeToolCall()` 权限检查后、工具执行前 | 可阻断 |
 | `POST_TOOL_CALL` | `ToolManager.executeToolCall()` 工具执行后 | 通知型 |
-| `PRE_COMMIT` | `GitTool`（调用方负责触发） | 可阻断 |
-| `POST_COMMIT` | `GitTool`（调用方负责触发） | 通知型 |
+| `PRE_COMMIT` | `GitTool.execute()` commit 命令执行前 | 可阻断 |
+| `POST_COMMIT` | `GitTool.execute()` commit 命令成功后 | 通知型 |
 | `PRE_RESPONSE` | `ConversationManager` 返回最终文本前（非流式 & 流式 DONE） | 可阻断 |
 | `POST_RESPONSE` | `ConversationManager` 返回最终文本后 | 通知型 |
 | `PERMISSION_DENIED` | `ToolManager.executeToolCall()` 权限拒绝时 | 通知型 |

@@ -68,6 +68,13 @@ public class ConversationController {
         return ResponseEntity.ok(conversationRepository.findAll());
     }
 
+    @GetMapping("/conversations/{id}")
+    public ResponseEntity<Conversation> getConversation(@PathVariable String id) {
+        return conversationRepository.findById(id)
+            .map(ResponseEntity::ok)
+            .orElse(ResponseEntity.notFound().build());
+    }
+
     // ===== 任务 =====
 
     @PostMapping("/tasks")
