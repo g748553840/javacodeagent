@@ -16,6 +16,8 @@ import java.util.Map;
 @AllArgsConstructor
 public class ConversationContext {
     private String conversationId;
+    /** 发起本次对话的用户 ID，由接入层从 X-User-Id 请求头注入，默认 "default" */
+    private String userId;
     private List<Message> messages;
     private List<ToolDefinition> availableTools;
     private PermissionLevel permissionLevel;

@@ -81,12 +81,19 @@ public class GlobTool implements Tool {
             List<String> matchedFiles = new ArrayList<>();
 
             try (Stream<Path> paths = Files.walk(baseDir)) {
-                PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
+                // PathMatcher 对绝对路径匹配行为不一致：
+                //   glob:*.java   → 只匹配不含 '/' 的单段路径，绝对路径永远不匹配
+                //   glob:**/*.java → 需要完整路径字符串与模式对齐
+                // 解决：统一转换为相对于 baseDir 的相对路径再做匹配，两种写法均正确工作
+                final PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
 
                 matchedFiles = paths
                     .filter(Files::isRegularFile)
-                    .filter(matcher::matches)
-                    .map(Path::toString)
+                    .filter(p -> {
+                        Path relative = baseDir.relativize(p);
+                        return matcher.matches(relative);
+                    })
+                    .map(p -> p.toAbsolutePath().toString())
                     .sorted()
                     .collect(Collectors.toList());
             }

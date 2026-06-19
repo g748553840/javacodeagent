@@ -2,11 +2,6 @@ spring:
   application:
     name: java-code-agent
 
-  h2:
-    console:
-      enabled: true
-      path: /h2-console
-
   jpa:
     hibernate:
       ddl-auto: update
@@ -16,12 +11,56 @@ spring:
         dialect: org.hibernate.dialect.H2Dialect
 
 llm:
+  # ── Anthropic Claude（默认）──────────────────────────────────────────────────
   provider: anthropic
-  api-key: ${LLM_API_KEY:your-api-key-here}
-  model: claude-opus-4-7
-  max-tokens: 8192
+  # 未设置 LLM_API_KEY 时留空，请求会返回 401，日志中可明确识别
+  api-key: ${LLM_API_KEY:}
+  model: claude-opus-4-8
+  max-tokens: 16384
   temperature: 0.7
   endpoint: https://api.anthropic.com
+  system-prompt: "You are an AI coding assistant with access to tools for reading, writing, and executing code. You are precise, efficient, and help users accomplish software engineering tasks."
+  thinking-enabled: false
+
+  # ── DeepSeek ─────────────────────────────────────────────────────────────────
+  # provider: deepseek
+  # api-key: ${LLM_API_KEY:your-deepseek-key}
+  # model: deepseek-chat          # 或 deepseek-reasoner
+  # max-tokens: 8192
+  # temperature: 0.7
+  # endpoint: https://api.deepseek.com/v1   # 可省略，会自动推断
+
+  # ── 智谱 GLM / ChatGLM ───────────────────────────────────────────────────────
+  # provider: glm
+  # api-key: ${LLM_API_KEY:your-zhipu-key}
+  # model: glm-4-plus             # 或 glm-4-flash、glm-4-air
+  # max-tokens: 8192
+  # temperature: 0.7
+  # endpoint: https://open.bigmodel.cn/api/paas/v4   # 可省略
+
+  # ── 阿里云通义 Qwen ───────────────────────────────────────────────────────────
+  # provider: qwen
+  # api-key: ${LLM_API_KEY:your-dashscope-key}
+  # model: qwen-max               # 或 qwen-plus、qwen-turbo
+  # max-tokens: 8192
+  # temperature: 0.7
+  # endpoint: https://dashscope.aliyuncs.com/compatible-mode/v1   # 可省略
+
+  # ── 标准 OpenAI ──────────────────────────────────────────────────────────────
+  # provider: openai
+  # api-key: ${LLM_API_KEY:your-openai-key}
+  # model: gpt-4o
+  # max-tokens: 16384
+  # temperature: 0.7
+  # endpoint: https://api.openai.com/v1   # 可省略
+
+  # ── 任意 OpenAI 兼容接口（如本地 Ollama、vLLM 等）──────────────────────────
+  # provider: custom
+  # api-key: ${LLM_API_KEY:optional}
+  # model: your-model-name
+  # max-tokens: 4096
+  # temperature: 0.7
+  # endpoint: http://localhost:11434/v1   # 必须填写完整 base URL
 
 permissions:
   default-level: SAFE
@@ -55,6 +94,18 @@ context:
 tasks:
   enabled: true
   max-concurrent: 10
+
+security:
+  # 留空或不配置则关闭认证；配置后所有 API 请求须携带：
+  #   Authorization: Bearer <api-key>  或  X-API-Key: <api-key>
+  api-key: ${AGENT_API_KEY:}
+
+mcp:
+  # 是否启用 MCP 协议客户端（默认关闭）
+  enabled: false
+  # 逗号分隔的 name=url 列表，例如：
+  # servers: "filesystem=http://localhost:3001,github=http://localhost:3002"
+  servers: ""
 
 logging:
   level:

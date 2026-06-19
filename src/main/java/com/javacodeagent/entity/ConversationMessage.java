@@ -5,15 +5,16 @@ import jakarta.persistence.*;
 import lombok.Data;
 
 import java.time.LocalDateTime;
-
 @Data
 @Entity
-@Table(name = "conversation_messages")
+@Table(name = "conversation_messages",
+    indexes = {@Index(name = "idx_conv_msg_created", columnList = "conversationId, createdAt")})
 public class ConversationMessage {
 
     @Id
     private String id;
 
+    @Column(name = "conversationId")
     private String conversationId;
 
     @Enumerated(EnumType.STRING)
@@ -22,9 +23,7 @@ public class ConversationMessage {
     @Column(columnDefinition = "CLOB")
     private String content;
 
-    private String compressedContent;
-
-    private boolean isCompressed;
+    private String toolCallId;
 
     @Column(columnDefinition = "CLOB")
     private String toolCallsJson;

@@ -99,6 +99,18 @@ public class BashTool implements Tool {
         return executeSync(command, input, context);
     }
 
+    /**
+     * 标记此工具包含同步阻塞操作（process.waitFor()），
+     * 调用方应确保在 Schedulers.boundedElastic() 线程上执行，
+     * 而非在 Netty/WebFlux IO 事件循环线程上直接调用。
+     * {@link com.javacodeagent.core.tool.ToolManager} 已通过
+     * {@code Mono.fromCallable} + {@code subscribeOn(boundedElastic())} 保障此点。
+     */
+    @Override
+    public boolean isBlocking() {
+        return true;
+    }
+
     private ToolExecutionResult executeSync(String command, Map<String, Object> input, ExecutionContext context) {
         int timeout = input.get("timeout") != null
             ? ((Number) input.get("timeout")).intValue()

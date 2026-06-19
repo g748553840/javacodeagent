@@ -14,6 +14,8 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 import java.util.Map;
@@ -58,11 +60,29 @@ public class ToolManager {
             String userId = context.getUserId() != null ? context.getUserId() : "default";
             PermissionType requiredPermission = tool.getRequiredPermission();
 
-            if (requiredPermission != null && !permissionService.checkPermission(userId, requiredPermission)) {
-                log.warn("Permission denied for tool {}: {} required", tool.getName(), requiredPermission);
-                return ToolExecutionResult.error(
-                    "Permission denied: " + requiredPermission + " required for tool " + tool.getName()
-                );
+            if (requiredPermission != null) {
+                // ExecutionContext.permissionLevel 优先（ExploreAgent / 隔离 Agent 设置的 READ_ONLY 等）
+                // 若为 null 则退化为 PermissionService 的用户级配置
+                boolean allowed = (context.getPermissionLevel() != null)
+                    ? permissionService.checkPermissionLevel(context.getPermissionLevel(), requiredPermission)
+                    : permissionService.checkPermission(userId, requiredPermission);
+
+                if (!allowed) {
+                    log.warn("Permission denied for tool {}: {} required (level={})",
+                        tool.getName(), requiredPermission, context.getPermissionLevel());
+                    hookManager.triggerHook(HookType.PERMISSION_DENIED, HookContext.builder()
+                        .type(HookType.PERMISSION_DENIED)
+                        .userId(userId)
+                        .conversationId(context.getConversationId())
+                        .data(Map.of(
+                            "toolName", tool.getName(),
+                            "reason", requiredPermission + " required for " + tool.getName()
+                        ))
+                        .build());
+                    return ToolExecutionResult.error(
+                        "Permission denied: " + requiredPermission + " required for tool " + tool.getName()
+                    );
+                }
             }
         }
 
@@ -80,7 +100,20 @@ public class ToolManager {
 
         try {
             Map<String, Object> input = toolCall.getInput();
-            ToolExecutionResult result = tool.execute(input, context);
+            ToolExecutionResult result;
+
+            if (tool.isBlocking()) {
+                // 阻塞工具（如 BashTool：process.waitFor()）必须在弹性线程池中运行，
+                // 不能占用 Netty IO 事件循环线程，否则在响应式管道中会导致死锁。
+                result = Mono.fromCallable(() -> tool.execute(input, context))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .block();
+                if (result == null) {
+                    result = ToolExecutionResult.error("Tool returned null result");
+                }
+            } else {
+                result = tool.execute(input, context);
+            }
 
             // Post-tool-call Hook
             HookContext postHookContext = HookContext.builder()

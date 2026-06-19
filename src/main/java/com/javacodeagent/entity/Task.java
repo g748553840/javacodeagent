@@ -22,6 +22,8 @@ public class Task {
     @Column(columnDefinition = "CLOB")
     private String description;
 
+    private String activeForm;
+
     @Enumerated(EnumType.STRING)
     private TaskStatus status;
 
@@ -31,9 +33,11 @@ public class Task {
 
     private LocalDateTime createdAt;
 
+    private LocalDateTime updatedAt;
+
     private LocalDateTime completedAt;
 
-    @ManyToMany
+    @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(name = "task_dependencies",
         joinColumns = @JoinColumn(name = "task_id"),
         inverseJoinColumns = @JoinColumn(name = "depends_on_task_id"))
@@ -42,8 +46,14 @@ public class Task {
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
         if (status == null) {
             status = TaskStatus.PENDING;
         }
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
     }
 }

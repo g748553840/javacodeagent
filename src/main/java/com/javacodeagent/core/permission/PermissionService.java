@@ -48,19 +48,34 @@ public class PermissionService {
     }
 
     public boolean checkPermission(String userId, PermissionType permissionType) {
+        // 全局 auto-approve 优先（来自 application.yml permissions.auto-approve）
+        if (isAutoApproved("_global", permissionType)) {
+            return true;
+        }
+        // 用户级 auto-approve
+        if (isAutoApproved(userId, permissionType)) {
+            return true;
+        }
+
         UserPermissions permissions = userPermissions.computeIfAbsent(
             userId,
             id -> new UserPermissions(defaultLevel)
         );
 
-        PermissionLevel level = permissions.getLevel();
+        return checkPermissionLevel(permissions.getLevel(), permissionType);
+    }
 
+    /**
+     * 纯粹按 PermissionLevel 检查权限，不依赖用户状态。
+     * 供 ToolManager 在 ExecutionContext 携带明确 permissionLevel 时使用（如 ExploreAgent 的 READ_ONLY 隔离）。
+     */
+    public boolean checkPermissionLevel(PermissionLevel level, PermissionType permissionType) {
         return switch (level) {
             case READ_ONLY -> permissionType == PermissionType.FILE_READ;
-            case SAFE -> permissionType == PermissionType.FILE_READ
-                || permissionType == PermissionType.FILE_WRITE;
-            case NORMAL -> true;
-            case ALL -> true;
+            case SAFE      -> permissionType == PermissionType.FILE_READ
+                           || permissionType == PermissionType.FILE_WRITE;
+            case NORMAL    -> permissionType != PermissionType.CONFIG_MODIFY;
+            case ALL       -> true;
         };
     }
 

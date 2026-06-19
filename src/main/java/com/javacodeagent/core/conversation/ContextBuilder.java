@@ -1,6 +1,8 @@
 package com.javacodeagent.core.conversation;
 
+import com.javacodeagent.config.PermissionConfig;
 import com.javacodeagent.core.enums.MessageType;
+import com.javacodeagent.core.enums.PermissionLevel;
 import com.javacodeagent.core.model.ConversationContext;
 import com.javacodeagent.core.model.Message;
 import com.javacodeagent.core.model.ToolDefinition;
@@ -24,6 +26,7 @@ import java.util.List;
 public class ContextBuilder {
 
     private final ToolManager toolManager;
+    private final PermissionConfig permissionConfig;
 
     /**
      * 从用户请求构建对话上下文
@@ -51,8 +54,10 @@ public class ContextBuilder {
 
         return ConversationContext.builder()
             .conversationId(request.getConversationId())
+            .userId(request.getUserId() != null ? request.getUserId() : "default")
             .messages(messages)
             .availableTools(availableTools)
+            .permissionLevel(resolveDefaultPermissionLevel())
             .workingDirectory(workingDir)
             .build();
     }
@@ -69,11 +74,24 @@ public class ContextBuilder {
 
         return ConversationContext.builder()
             .conversationId(previousContext.getConversationId())
+            .userId(previousContext.getUserId())
             .messages(allMessages)
             .availableTools(previousContext.getAvailableTools())
             .permissionLevel(previousContext.getPermissionLevel())
             .workingDirectory(previousContext.getWorkingDirectory())
             .metadata(previousContext.getMetadata())
             .build();
+    }
+
+    /** 从配置解析默认权限级别，解析失败时退化为 SAFE。 */
+    private PermissionLevel resolveDefaultPermissionLevel() {
+        if (permissionConfig.getDefaultLevel() == null) return PermissionLevel.SAFE;
+        try {
+            return PermissionLevel.valueOf(permissionConfig.getDefaultLevel().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            log.warn("Unknown permissions.default-level '{}', falling back to SAFE",
+                permissionConfig.getDefaultLevel());
+            return PermissionLevel.SAFE;
+        }
     }
 }

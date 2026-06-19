@@ -14,4 +14,6 @@ public class LLMConfig {
     private int maxTokens;
     private double temperature;
     private String endpoint;
+    private String systemPrompt;
+    private boolean thinkingEnabled;
 }

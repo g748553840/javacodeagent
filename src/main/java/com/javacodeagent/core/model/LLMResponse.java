@@ -1,6 +1,5 @@
 package com.javacodeagent.core.model;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -15,9 +14,6 @@ import java.util.Map;
 @AllArgsConstructor
 public class LLMResponse {
     private String id;
-    private String type;
-    private String role;
-    private List<Message> messages;
     private String content;
     private List<ToolCall> toolCalls;
     private String stopReason;

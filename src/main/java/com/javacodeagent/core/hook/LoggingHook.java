@@ -23,6 +23,10 @@ public class LoggingHook implements HookHandler {
                 String result = context.getData() != null
                     ? (String) context.getData().getOrDefault("result", "unknown")
                     : "unknown";
+                // 截断过长内容，防止文件内容等敏感信息写入日志
+                if (result != null && result.length() > 200) {
+                    result = result.substring(0, 200) + "...[truncated]";
+                }
                 log.info("[Hook] Post-tool call: {} result: {}", toolName, result);
             }
             case PERMISSION_DENIED -> {

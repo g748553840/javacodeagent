@@ -1,17 +1,30 @@
 package com.javacodeagent.core.skill;
 
 import com.javacodeagent.core.model.ExecutionContext;
+import jakarta.annotation.PostConstruct;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class SkillManager {
 
     private final Map<String, Skill> skills = new ConcurrentHashMap<>();
+    /** Spring 自动注入所有实现了 Skill 接口的 @Component Bean */
+    private final List<Skill> skillBeans;
+
+    @PostConstruct
+    public void init() {
+        for (Skill skill : skillBeans) {
+            registerSkill(skill);
+        }
+    }
 
     public void registerSkill(Skill skill) {
         skills.put(skill.getName(), skill);

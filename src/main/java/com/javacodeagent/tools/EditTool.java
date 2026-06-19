@@ -14,6 +14,8 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Component
@@ -97,9 +99,10 @@ public class EditTool implements Tool {
                 return ToolExecutionResult.error("old_string not found in file: " + filePath);
             }
 
+            // replaceFirst 的第一个参数是正则，必须对 oldString 做字面量转义
             String newContent = replaceAll
                 ? content.replace(oldString, newString)
-                : content.replaceFirst(oldString, newString);
+                : content.replaceFirst(Pattern.quote(oldString), Matcher.quoteReplacement(newString));
 
             Files.writeString(path, newContent, StandardCharsets.UTF_8);
 

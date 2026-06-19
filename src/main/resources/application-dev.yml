@@ -1,0 +1,9 @@
+# 开发环境专用配置（生产环境不加载此文件）
+# 激活方式：spring.profiles.active=dev 或 -Dspring.profiles.active=dev
+spring:
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    show-sql: true

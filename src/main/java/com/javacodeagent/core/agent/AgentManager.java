@@ -3,6 +3,7 @@ package com.javacodeagent.core.agent;
 import com.javacodeagent.core.enums.PermissionLevel;
 import com.javacodeagent.core.model.ExecutionContext;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -13,6 +14,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @Service
@@ -22,10 +25,26 @@ public class AgentManager {
     private final Map<String, Agent> agents = new ConcurrentHashMap<>();
     private final List<Agent> agentBeans;
 
+    /**
+     * 专用线程池，避免使用 ForkJoinPool 公共池（ForkJoinPool 对阻塞任务不友好，
+     * 且与 WebFlux 公共线程池共争资源）。
+     * 使用虚拟线程（Java 21+）：轻量、无需调整线程数、阻塞友好。
+     */
+    private ExecutorService agentExecutor;
+
     @PostConstruct
     public void init() {
+        // Java 21 虚拟线程执行器：每个任务一个虚拟线程，阻塞时不占用平台线程
+        agentExecutor = Executors.newVirtualThreadPerTaskExecutor();
         for (Agent agent : agentBeans) {
             registerAgent(agent);
+        }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        if (agentExecutor != null) {
+            agentExecutor.shutdown();
         }
     }
 
@@ -56,17 +75,21 @@ public class AgentManager {
     }
 
     public CompletableFuture<AgentResult> launchAgentAsync(String agentType, AgentTask task, AgentContext context) {
-        return CompletableFuture.supplyAsync(() -> executeAgent(agentType, task, context));
+        return CompletableFuture.supplyAsync(
+            () -> executeAgent(agentType, task, context),
+            agentExecutor);
     }
 
     /**
-     * 并行启动多个 Agent，等待所有完成并返回结果列表
+     * 并行启动多个 Agent，等待所有完成并返回结果列表。
+     * 使用专用虚拟线程执行器，避免阻塞 WebFlux 事件循环或公共 ForkJoinPool。
      */
     public List<AgentResult> launchParallelAgents(List<AgentTask> tasks, AgentContext context) {
         List<CompletableFuture<AgentResult>> futures = new ArrayList<>();
         for (AgentTask task : tasks) {
-            CompletableFuture<AgentResult> future = CompletableFuture.supplyAsync(() ->
-                executeAgent(task.getType(), task, context));
+            CompletableFuture<AgentResult> future = CompletableFuture.supplyAsync(
+                () -> executeAgent(task.getType(), task, context),
+                agentExecutor);
             futures.add(future);
         }
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
@@ -76,7 +99,7 @@ public class AgentManager {
     }
 
     /**
-     * 在隔离环境中执行 Agent（READ_ONLY 权限，独立上下文）
+     * 在隔离环境中执行 Agent（READ_ONLY 权限，独立上下文）。
      */
     public CompletableFuture<AgentResult> launchIsolatedAgent(AgentTask task, AgentContext context) {
         ExecutionContext isolatedExec = ExecutionContext.builder()
@@ -94,6 +117,9 @@ public class AgentManager {
             .availableTools(List.of("glob", "grep", "read", "list"))
             .build();
 
-        return CompletableFuture.supplyAsync(() -> executeAgent(task.getType(), task, isolatedContext));
+        return CompletableFuture.supplyAsync(
+            () -> executeAgent(task.getType(), task, isolatedContext),
+            agentExecutor);
     }
 }
+

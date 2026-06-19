@@ -1,139 +1,163 @@
 package com.javacodeagent.core.conversation;
 
+import com.javacodeagent.config.ContextCompressionConfig;
 import com.javacodeagent.core.enums.MessageType;
+import com.javacodeagent.core.llm.LLMClient;
 import com.javacodeagent.core.model.ConversationContext;
 import com.javacodeagent.core.model.Message;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.UUID;
 
 /**
- * 上下文压缩器
- * 当消息历史接近 token 限制时，将早期非关键消息压缩为摘要
+ * Context compressor that uses the LLM to generate semantic summaries of old messages,
+ * reducing token usage while preserving important context.
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class ContextCompressor {
 
-    /**
-     * 触发压缩的消息数阈值
-     */
-    private static final int COMPRESSION_THRESHOLD = 40;
+    private final LLMClient llmClient;
+    private final ContextCompressionConfig compressionConfig;
 
     /**
-     * 压缩后保留的最近消息数
+     * Compresses the conversation context when message count exceeds the threshold.
+     * Uses LLM summarization for accurate semantic compression.
      */
-    private static final int KEEP_RECENT_MESSAGES = 10;
-
-    /**
-     * 最大摘要长度
-     */
-    private static final int MAX_SUMMARY_LENGTH = 2000;
-
-    /**
-     * 压缩对话上下文
-     * 策略：将最早的非关键消息智能压缩为摘要
-     *
-     * @param context 原始上下文
-     * @return 压缩后的上下文（如果未达到阈值，返回原上下文）
-     */
-    public ConversationContext compress(ConversationContext context) {
-        if (context.getMessages() == null || context.getMessages().size() <= COMPRESSION_THRESHOLD) {
-            return context;
+    public Mono<ConversationContext> compress(ConversationContext context) {
+        if (!compressionConfig.isEnabled()
+                || context.getMessages() == null
+                || context.getMessages().size() <= compressionConfig.getThreshold()) {
+            return Mono.just(context);
         }
 
         List<Message> messages = context.getMessages();
-        List<Message> toCompress = messages.subList(0, messages.size() - KEEP_RECENT_MESSAGES);
-        List<Message> keep = new ArrayList<>(messages.subList(
-            messages.size() - KEEP_RECENT_MESSAGES,
-            messages.size()
-        ));
+        int keepRecent = compressionConfig.getKeepRecent();
+        List<Message> toCompress = new ArrayList<>(
+            messages.subList(0, messages.size() - keepRecent));
+        List<Message> toKeep = new ArrayList<>(
+            messages.subList(messages.size() - keepRecent, messages.size()));
 
-        // 构建摘要
-        String summary = buildSummary(toCompress);
+        log.info("Compressing context: {} messages -> LLM summary + {} recent",
+            messages.size(), toKeep.size());
 
-        // 创建摘要消息
+        return buildLLMSummary(toCompress, context)
+            .map(summary -> buildCompressedContext(context, summary, toKeep))
+            .onErrorResume(e -> {
+                log.warn("LLM summarization failed, using fallback string summary", e);
+                String fallbackSummary = buildFallbackSummary(toCompress);
+                return Mono.just(buildCompressedContext(context, fallbackSummary, toKeep));
+            });
+    }
+
+    private Mono<String> buildLLMSummary(List<Message> messages, ConversationContext originalContext) {
+        String conversationText = formatMessagesForSummary(messages);
+
+        String summarizationPrompt =
+            "Summarize the following conversation history concisely. Focus on:\n" +
+            "1. The user's primary goals and requests\n" +
+            "2. Tools executed and their key results\n" +
+            "3. Important decisions or findings\n" +
+            "4. Current state of any in-progress tasks\n\n" +
+            "Keep the summary under 400 words. Be specific about file paths, " +
+            "function names, and error messages mentioned.\n\n" +
+            "Conversation to summarize:\n" + conversationText;
+
+        ConversationContext summarizationContext = ConversationContext.builder()
+            .conversationId("summary-" + UUID.randomUUID())
+            .messages(List.of(
+                Message.builder()
+                    .type(MessageType.USER)
+                    .content(summarizationPrompt)
+                    .build()
+            ))
+            .workingDirectory(originalContext.getWorkingDirectory())
+            .build();
+
+        return llmClient.chat(summarizationContext)
+            .map(response -> response.getContent() != null ? response.getContent() : "")
+            .filter(s -> !s.isEmpty())
+            .switchIfEmpty(Mono.just(buildFallbackSummary(messages)));
+    }
+
+    private String formatMessagesForSummary(List<Message> messages) {
+        StringBuilder sb = new StringBuilder();
+        for (Message msg : messages) {
+            if (msg.getContent() == null || msg.getContent().isEmpty()) {
+                continue;
+            }
+            String role = msg.getType().name();
+            String content = msg.getContent().length() > 500
+                ? msg.getContent().substring(0, 500) + "...[truncated]"
+                : msg.getContent();
+
+            if (msg.getType() == MessageType.TOOL_RESULT) {
+                content = "[Tool Result id=" + msg.getToolCallId() + "] " + content;
+            }
+            sb.append(role).append(": ").append(content).append("\n\n");
+        }
+        return sb.toString();
+    }
+
+    private String buildFallbackSummary(List<Message> messages) {
+        StringBuilder summary = new StringBuilder("Earlier conversation: ");
+        int charBudget = 1500;
+
+        for (Message msg : messages) {
+            if (msg.getContent() == null || msg.getContent().isEmpty()) continue;
+            if (msg.getType() == MessageType.SYSTEM) continue;
+
+            String entry;
+            if (msg.getType() == MessageType.USER) {
+                entry = "[User] " + truncate(msg.getContent(), 200);
+            } else if (msg.getType() == MessageType.ASSISTANT) {
+                entry = "[Assistant] " + truncate(msg.getContent(), 150);
+            } else if (msg.getType() == MessageType.TOOL_RESULT) {
+                entry = "[ToolResult] " + truncate(msg.getContent(), 100);
+            } else {
+                continue;
+            }
+
+            if (summary.length() + entry.length() > charBudget) {
+                summary.append("...[earlier messages omitted]");
+                break;
+            }
+            summary.append(entry).append("; ");
+        }
+        return summary.toString();
+    }
+
+    private ConversationContext buildCompressedContext(
+            ConversationContext original, String summary, List<Message> recentMessages) {
+
         Message summaryMessage = Message.builder()
             .type(MessageType.SYSTEM)
-            .content("[Compressed Summary of earlier conversation]: " + summary)
+            .content("[Compressed conversation summary]: " + summary)
             .build();
 
         List<Message> compressed = new ArrayList<>();
         compressed.add(summaryMessage);
-        compressed.addAll(keep);
-
-        log.info("Context compressed: {} messages -> 1 summary + {} recent messages",
-            messages.size(), keep.size());
+        compressed.addAll(recentMessages);
 
         return ConversationContext.builder()
-            .conversationId(context.getConversationId())
+            .conversationId(original.getConversationId())
+            .userId(original.getUserId())   // 压缩后保持用户身份不变
             .messages(compressed)
-            .availableTools(context.getAvailableTools())
-            .permissionLevel(context.getPermissionLevel())
-            .workingDirectory(context.getWorkingDirectory())
-            .metadata(context.getMetadata())
+            .availableTools(original.getAvailableTools())
+            .permissionLevel(original.getPermissionLevel())
+            .workingDirectory(original.getWorkingDirectory())
+            .metadata(original.getMetadata())
             .build();
     }
 
-    /**
-     * 构建消息摘要
-     * 提取关键信息：用户意图、工具调用结果、重要决定
-     */
-    private String buildSummary(List<Message> messages) {
-        StringBuilder summary = new StringBuilder();
-
-        for (Message msg : messages) {
-            String content = extractKeyContent(msg);
-            if (content != null && !content.isEmpty()) {
-                if (summary.length() + content.length() > MAX_SUMMARY_LENGTH) {
-                    summary.append("...[truncated]");
-                    break;
-                }
-                summary.append("[").append(msg.getType()).append("] ").append(content).append("; ");
-            }
-        }
-
-        return summary.toString();
-    }
-
-    /**
-     * 提取消息中的关键内容
-     * 过滤掉过长的工具调用结果和无意义消息
-     */
-    private String extractKeyContent(Message msg) {
-        if (msg.getContent() == null || msg.getContent().isEmpty()) {
-            return null;
-        }
-
-        // 只提取有意义的内容（长度 > 10 且不是纯工具输出）
-        if (msg.getType() == MessageType.USER && msg.getContent().length() > 10) {
-            return truncateContent(msg.getContent(), 200);
-        }
-
-        if (msg.getType() == MessageType.ASSISTANT && msg.getContent().length() > 10) {
-            // 只保留助手响应的前 150 个字符
-            return truncateContent(msg.getContent(), 150);
-        }
-
-        if (msg.getType() == MessageType.TOOL_RESULT) {
-            // 工具结果只保留成功/失败状态和简短的摘要
-            if (msg.getContent() != null && msg.getContent().length() < 200) {
-                return "[Tool Result] " + truncateContent(msg.getContent(), 100);
-            }
-            // 过长的工具结果用占位符
-            return "[Tool Result] (length: " + msg.getContent().length() + " chars)";
-        }
-
-        return null;
-    }
-
-    private String truncateContent(String content, int maxLen) {
-        if (content == null || content.length() <= maxLen) {
-            return content;
-        }
-        return content.substring(0, maxLen) + "...";
+    private String truncate(String s, int max) {
+        if (s == null || s.length() <= max) return s;
+        return s.substring(0, max) + "...";
     }
 }

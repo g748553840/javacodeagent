@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,9 +99,15 @@ public class GrepTool implements Tool {
 
                     String glob = (String) input.get("glob");
                     if (glob != null && !glob.isEmpty()) {
-                        String finalGlob = "glob:" + glob;
-                        filtered = filtered.filter(p ->
-                            FileSystems.getDefault().getPathMatcher(finalGlob).matches(p));
+                        // 与 GlobTool 对齐：将文件路径转为相对于 searchPath 的相对路径后匹配，
+                        // 避免绝对路径与 glob 模式不兼容的问题
+                        final PathMatcher globMatcher = FileSystems.getDefault()
+                            .getPathMatcher("glob:" + glob);
+                        final Path base = searchPath;
+                        filtered = filtered.filter(p -> {
+                            Path relative = base.relativize(p);
+                            return globMatcher.matches(relative);
+                        });
                     }
 
                     filtered.forEach(file -> searchInFile(file, compiledPattern, result));
@@ -126,14 +133,23 @@ public class GrepTool implements Tool {
 
     private void searchInFile(Path file, Pattern pattern, StringBuilder result) {
         try (Stream<String> lines = Files.lines(file)) {
-            List<String> matchedLines = lines
-                .filter(line -> pattern.matcher(line).find())
-                .toList();
+            // 带实际行号的匹配（indexed stream → 行号从 1 开始）
+            final int[] lineNum = {0};
+            List<String> matchedLines = new ArrayList<>();
+            List<Integer> matchedLineNums = new ArrayList<>();
+
+            lines.forEach(line -> {
+                lineNum[0]++;
+                if (pattern.matcher(line).find()) {
+                    matchedLines.add(line);
+                    matchedLineNums.add(lineNum[0]);
+                }
+            });
 
             if (!matchedLines.isEmpty()) {
                 result.append(file.toString()).append(":\n");
                 for (int i = 0; i < matchedLines.size(); i++) {
-                    result.append("  ").append(i + 1).append(": ")
+                    result.append("  ").append(matchedLineNums.get(i)).append(": ")
                         .append(matchedLines.get(i)).append("\n");
                 }
                 result.append("\n");

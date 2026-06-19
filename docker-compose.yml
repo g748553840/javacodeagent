@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  java-code-agent:
+    build: .
+    image: java-code-agent:latest
+    container_name: java-code-agent
+    ports:
+      - "8080:8080"
+    environment:
+      LLM_API_KEY: ${LLM_API_KEY:-your-api-key-here}
+      # 可选：覆盖 LLM provider
+      # SPRING_PROFILES_ACTIVE: production
+    volumes:
+      # 持久化记忆文件
+      - agent-memory:/root/.java-code-agent/memory
+      # 挂载主机代码目录（供 Agent 读写）
+      - ${WORKSPACE_DIR:-/tmp/workspace}:/workspace
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  agent-memory:
