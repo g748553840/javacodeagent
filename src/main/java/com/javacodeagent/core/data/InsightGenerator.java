@@ -1,0 +1,87 @@
+package com.javacodeagent.core.data;
+
+import com.javacodeagent.core.data.model.ChartSpec;
+import com.javacodeagent.core.data.model.InsightResult;
+import com.javacodeagent.core.enums.MessageType;
+import com.javacodeagent.core.enums.PermissionLevel;
+import com.javacodeagent.core.llm.LLMClient;
+import com.javacodeagent.core.model.ConversationContext;
+import com.javacodeagent.core.model.Message;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class InsightGenerator {
+
+    private static final String INSIGHT_PROMPT = """
+        You are a data analyst. Based on the SQL query results below, provide a concise business insight in Markdown format.
+
+        Original question: {question}
+        SQL executed: {sql}
+        Data sample (first {sample_size} rows):
+        {data_sample}
+
+        Requirements:
+        - Start with the key finding
+        - Quantify with specific numbers where possible
+        - Suggest one actionable recommendation
+        - Keep it 2-4 sentences
+        - Use {lang} language
+        - Do NOT wrap in code blocks
+        """;
+
+    private final LLMClient llmClient;
+
+    public Mono<InsightResult> generate(String question, ChartSpec chartSpec) {
+        if (chartSpec.getData() == null || chartSpec.getData().isEmpty()) {
+            return Mono.just(new InsightResult(chartSpec, "Query returned no data."));
+        }
+
+        String dataSample = formatDataSample(chartSpec.getData(), 10);
+        int sampleSize = Math.min(10, chartSpec.getData().size());
+        String lang = detectLanguage(question);
+
+        String prompt = INSIGHT_PROMPT
+            .replace("{question}", question)
+            .replace("{sql}", chartSpec.getSql())
+            .replace("{sample_size}", String.valueOf(sampleSize))
+            .replace("{data_sample}", dataSample)
+            .replace("{lang}", lang);
+
+        ConversationContext ctx = ConversationContext.builder()
+            .conversationId("insight-" + UUID.randomUUID())
+            .userId("system")
+            .permissionLevel(PermissionLevel.READ_ONLY)
+            .messages(List.of(
+                Message.builder().type(MessageType.USER).content(prompt).build()
+            ))
+            .build();
+
+        return llmClient.chat(ctx)
+            .map(resp -> new InsightResult(chartSpec, resp.getContent()))
+            .doOnError(e -> log.error("Insight generation failed", e))
+            .onErrorReturn(new InsightResult(chartSpec, chartSpec.getThought()));
+    }
+
+    private String formatDataSample(List<Map<String, Object>> rows, int limit) {
+        return rows.stream().limit(limit)
+            .map(row -> row.entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .collect(Collectors.joining(", ")))
+            .collect(Collectors.joining("\n"));
+    }
+
+    private String detectLanguage(String text) {
+        boolean hasChinese = text.chars().anyMatch(c -> c >= 0x4E00 && c <= 0x9FA5);
+        return hasChinese ? "Chinese" : "English";
+    }
+}

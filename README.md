@@ -29,7 +29,7 @@
 | **多模型支持** | Anthropic Claude + 所有 OpenAI 兼容接口（DeepSeek / GLM / Qwen / OpenAI） |
 | **Agentic Loop** | 自主工具调用循环，最多 10 轮，自动处理 `tool_use` / `tool_result` |
 | **流式 SSE** | 结构化 SSE 事件（tool_start / tool_result / content / done） |
-| **工具系统** | Read / Write / Edit / Glob / Grep / List / Bash / Git，可插件化扩展 |
+| **工具系统** | Read / Write / Edit / Glob / Grep / List / Bash / Git / SqlQuery，可插件化扩展 |
 | **权限模型** | READ_ONLY / SAFE / NORMAL / ALL 四级，工具自声明所需权限 |
 | **Hook 机制** | PRE/POST_TOOL_CALL 等 7 种钩子，支持拦截与审计 |
 | **上下文压缩** | 消息 > 40 条时调用 LLM 进行语义摘要，保留最近 10 条 |
@@ -42,15 +42,20 @@
 | **Token 流式** | chatStreamFull() 逐 token 流式 + 工具调用协作，实时打字机效果 |
 | **HTTP 认证** | ApiKeyAuthFilter，Bearer Token / X-API-Key 双格式鉴权 |
 | **后台任务** | BackgroundTaskExecutor 结果保留 5 分钟，定时清理 |
+| **数据分析智能体** | NL2SQL 全流水线（Schema 检索→SQL 生成→执行→洞察），GPT-Vis 8 种图表协议 |
+| **Excel/CSV 分析** | 上传文件→H2 内存表→NL 查询，Apache POI + Commons CSV |
+| **Dashboard 多图** | LLM 规划 2-4 张互补图表，并行执行，错误隔离 |
 
 ---
 
 ## 技术栈
 
 - **Java 21** — 虚拟线程、Switch 表达式、Records
-- **Spring Boot 3.2.5** — WebFlux / JPA / Actuator / Validation
+- **Spring Boot 3.2.5** — WebFlux / JPA / Actuator / Validation / JDBC
 - **Reactor** — Mono / Flux 响应式编程
-- **H2** — 嵌入式数据库（开发环境），可切换 PostgreSQL
+- **H2** — 嵌入式数据库（开发环境），可切换 PostgreSQL；Data Agent 使用 H2 内存表存储 Excel 导入数据
+- **Apache POI 5.2.5** — Excel (.xlsx/.xls) 读取与解析
+- **Apache Commons CSV 1.10.0** — CSV 文件解析
 - **Lombok** — 减少样板代码
 - **Jackson** — JSON 序列化 / SSE 事件格式化
 - **Anthropic API** — `/v1/messages`，支持 `tool_use`、`thinking`、SSE 流式

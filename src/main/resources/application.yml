@@ -107,6 +107,19 @@ mcp:
   # servers: "filesystem=http://localhost:3001,github=http://localhost:3002"
   servers: ""
 
+# ── Data Agent 数据分析配置 ───────────────────────────────────────────────────
+data-agent:
+  # 数据库方言：h2 | mysql | postgresql
+  dialect: h2
+  # 数据库/Schema 名称（H2 默认为 PUBLIC）
+  db-name: PUBLIC
+  # 若需对接外部数据库，在此配置独立数据源：
+  # datasource:
+  #   url: jdbc:mysql://localhost:3306/mydb?useSSL=false
+  #   username: root
+  #   password: secret
+  #   driver-class-name: com.mysql.cj.jdbc.Driver
+
 logging:
   level:
     com.javacodeagent: DEBUG
