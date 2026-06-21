@@ -1,6 +1,7 @@
 package com.javacodeagent.tools;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.DataSourceConnector;
 import com.javacodeagent.core.data.SqlValidator;
 import com.javacodeagent.core.data.model.DataQueryResult;
@@ -13,7 +14,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,7 +53,7 @@ public class SqlQueryTool implements Tool {
     public boolean requiresPermission() { return true; }
 
     @Override
-    public PermissionType getRequiredPermission() { return PermissionType.SHELL_EXECUTE; }
+    public PermissionType getRequiredPermission() { return PermissionType.DATABASE_READ; }
 
     @Override
     public boolean isBlocking() { return true; }
@@ -61,7 +61,7 @@ public class SqlQueryTool implements Tool {
     @Override
     public ToolExecutionResult execute(Map<String, Object> input, ExecutionContext context) {
         String sql = (String) input.get("sql");
-        int maxRows = input.get("max_rows") instanceof Number n ? n.intValue() : 200;
+        int maxRows = input.get("max_rows") instanceof Number n ? n.intValue() : DataAgentConstants.DEFAULT_MAX_ROWS;
 
         SqlValidationResult valid = sqlValidator.validate(sql);
         if (!valid.isAllowed()) {
@@ -69,7 +69,7 @@ public class SqlQueryTool implements Tool {
         }
 
         try {
-            DataQueryResult result = connector.executeQuery(sql, maxRows, Duration.ofSeconds(30));
+            DataQueryResult result = connector.executeQuery(sql, maxRows, DataAgentConstants.DEFAULT_QUERY_TIMEOUT);
             List<Map<String, Object>> records = toRecords(result);
             String json = objectMapper.writeValueAsString(Map.of(
                 "columns", result.columns(),

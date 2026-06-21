@@ -40,11 +40,14 @@
 | **MCP 协议** | McpService 连接外部 MCP 服务器，自动发现并注册远程工具 |
 | **对话持久化** | ConversationMessage JPA 持久化，重启后消息历史不丢失 |
 | **Token 流式** | chatStreamFull() 逐 token 流式 + 工具调用协作，实时打字机效果 |
-| **HTTP 认证** | ApiKeyAuthFilter，Bearer Token / X-API-Key 双格式鉴权 |
+| **HTTP 认证** | ApiKeyAuthFilter，Bearer Token / X-API-Key 双格式鉴权；JWT 模式（JwtAuthFilter）自动从 sub claim 提取 userId |
 | **后台任务** | BackgroundTaskExecutor 结果保留 5 分钟，定时清理 |
 | **数据分析智能体** | NL2SQL 全流水线（Schema 检索→SQL 生成→执行→洞察），GPT-Vis 8 种图表协议 |
-| **Excel/CSV 分析** | 上传文件→H2 内存表→NL 查询，Apache POI + Commons CSV |
+| **Excel/CSV 分析** | 上传文件→H2 内存表→NL 查询，Apache POI + Commons CSV；CJK 列名 LLM 自动翻译 |
 | **Dashboard 多图** | LLM 规划 2-4 张互补图表，并行执行，错误隔离 |
+| **多 Agent 协作分析** | DataAnalysisAgent + AnomalyDetectorAgent + VolatilityAnalysisAgent + ReportGenerationAgent 并行分析 |
+| **历史 SQL 缓存** | SqlCacheService LRU + TTL 缓存，相似问题复用 SQL，减少 LLM 调用 |
+| **容器化** | Dockerfile（multi-stage, JDK 21）+ docker-compose.yml（H2）+ docker-compose-pg.yml（PostgreSQL）|
 
 ---
 
@@ -67,6 +70,9 @@
 
 ```
 javacodeagent/
+├── Dockerfile                         # Multi-stage build (maven:3.9 + JRE 21, non-root)
+├── docker-compose.yml                 # H2 内嵌，开箱即用
+├── docker-compose-pg.yml              # PostgreSQL 生产模式
 ├── src/main/java/com/javacodeagent/
 │   ├── Application.java                   # 应用入口，@EnableScheduling
 │   ├── config/
@@ -76,12 +82,19 @@ javacodeagent/
 │   │   ├── ContextCompressionConfig.java  # 上下文压缩配置（threshold / keep-recent）
 │   │   ├── MemoryConfig.java              # 记忆存储路径
 │   │   ├── HookRegistrationConfig.java    # 内置 Hook 注册
-│   │   ├── ApiKeyAuthFilter.java          # API Key 全局 WebFilter
+│   │   ├── DataAgentConfig.java           # DataSourceConnector Bean（可选外部数据源）
+│   │   ├── ApiKeyAuthFilter.java          # API Key 全局 WebFilter（@Order(2)）
+│   │   ├── JwtAuthFilter.java             # JWT 认证 WebFilter（@Order(1)，优先于 ApiKey）
 │   │   └── WebConfig.java                 # CORS 配置
 │   ├── controller/
 │   │   ├── ConversationController.java    # /tasks /plan /memory /skills REST
-│   │   └── ConversationWebSocketHandler.java  # /chat /chat/stream SSE 端点
+│   │   ├── ConversationWebSocketHandler.java  # /chat /chat/stream SSE 端点
+│   │   ├── DataAgentController.java       # /api/v1/data-agent/* REST + SSE + /multi-analysis
+│   │   └── ExcelAnalysisController.java   # /api/v1/data-agent/excel/* 上传 & 查询
 │   ├── core/
+│   │   ├── auth/
+│   │   │   ├── JwtService.java            # JWT 生成/验证（HMAC-SHA256, sub=userId）
+│   │   │   └── AuthController.java        # POST /api/v1/auth/token（公开路径）
 │   │   ├── llm/
 │   │   │   ├── LLMClient.java             # 接口：chat() / chatStream() / chatStreamFull()
 │   │   │   ├── AnthropicLLMClient.java    # Anthropic 实现（content_block delta 解析）
@@ -92,46 +105,42 @@ javacodeagent/
 │   │   │   ├── ContextCompressor.java     # LLM 语义压缩（Mono<ConversationContext>）
 │   │   │   ├── ResponseParser.java        # 解析 LLMResponse → tool calls + text
 │   │   │   └── MessagePersistenceService.java  # 消息 JPA 持久化（@Transactional）
-│   │   ├── tool/
-│   │   │   ├── Tool.java                  # 工具接口（含 isBlocking() 声明）
-│   │   │   └── ToolManager.java           # 自动注册、权限校验、Hook 触发、阻塞调度
-│   │   ├── hook/
-│   │   │   ├── HookManager.java           # 注册 & 触发 Hook 链（CopyOnWriteArrayList）
-│   │   │   ├── HookType.java              # 7 种 Hook 类型
-│   │   │   └── LoggingHook.java           # 内置日志 Hook（工具结果截断 200 字符）
-│   │   ├── permission/
-│   │   │   └── PermissionService.java     # 按用户 & 级别检查权限
-│   │   ├── memory/
-│   │   │   └── MemoryService.java         # 读写 .md 记忆文件，维护 MEMORY.md 索引
-│   │   ├── agent/
-│   │   │   ├── AgentManager.java          # 同步/异步/并行/隔离 Agent 调度（虚拟线程）
-│   │   │   └── ExploreAgent.java          # 只读探索 Agent（实际调用 Glob/Grep/Read/List）
-│   │   ├── plan/
-│   │   │   └── PlanService.java           # 五阶段计划模式状态机（JPA 双层持久化）
-│   │   ├── task/
-│   │   │   └── TaskManager.java           # 任务 CRUD & 依赖 DAG（JPA 双层持久化）
-│   │   └── skill/
-│   │       └── SkillManager.java          # 技能系统（@PostConstruct 自动发现 Bean）
-│   ├── tools/                             # 内置工具实现
-│   │   ├── ReadTool.java                  # 分页读取（offset/limit）
-│   │   ├── WriteTool.java
-│   │   ├── EditTool.java                  # 字面量字符串替换（Pattern.quote 防注入）
-│   │   ├── GlobTool.java                  # 相对路径 glob 匹配
-│   │   ├── GrepTool.java                  # 正则搜索（真实行号）
-│   │   ├── ListTool.java
-│   │   ├── BashTool.java                  # isBlocking=true，走 boundedElastic 调度
-│   │   ├── GitTool.java                   # Git 操作（白名单命令，引号检测）
-│   │   ├── BackgroundTaskExecutor.java    # 异步执行（虚拟线程，结果保留 5min）
-│   │   └── FilePathResolver.java          # 路径遍历（Path Traversal）防护
-│   ├── entity/                            # JPA 实体
-│   │   ├── Conversation.java
-│   │   ├── ConversationMessage.java       # 含复合索引（conversationId, createdAt）
-│   │   ├── Task.java                      # @ManyToMany EAGER 自引用依赖
-│   │   └── PlanEntity.java               # steps/allowedPrompts 序列化为 JSON CLOB
+│   │   ├── data/                          # ── Data Agent 数据分析模块 ──
+│   │   │   ├── DataAgentPipeline.java     # 主编排：Schema→NL2SQL→执行→洞察
+│   │   │   ├── DataSourceConnector.java   # 数据源抽象接口
+│   │   │   ├── JdbcDataSourceConnector.java  # JDBC 实现（H2/MySQL/PostgreSQL 方言）
+│   │   │   ├── ExcelDataSourceConnector.java # Excel/CSV → H2；中文列名 LLM 翻译
+│   │   │   ├── SchemaRetriever.java       # Schema 检索（CJK codePointCount 修复）
+│   │   │   ├── Nl2SqlService.java         # NL→SQL（LLMClient + SqlCacheService）
+│   │   │   ├── SqlCacheService.java       # LRU+TTL SQL 缓存（500 条，1h TTL）
+│   │   │   ├── SqlValidator.java          # DML/DDL 白名单拦截（12 个受阻关键词）
+│   │   │   ├── SqlExecutor.java           # SQL 执行（boundedElastic，防阻塞 Netty）
+│   │   │   ├── InsightGenerator.java      # 结果解读（LLM → Markdown 洞察）
+│   │   │   ├── DashboardGenerator.java    # 多图 Dashboard（Flux.flatMap 并行 SQL）
+│   │   │   ├── DataAgentConstants.java    # 所有共享常量（魔法值中心化）
+│   │   │   ├── agent/
+│   │   │   │   ├── DataAnalysisAgent.java      # 编排器（虚拟线程并行派发）
+│   │   │   │   ├── AnomalyDetectorAgent.java   # 异常检测（LLM + JSON 数组输出）
+│   │   │   │   ├── VolatilityAnalysisAgent.java # 波动分析（CV/趋势/极值）
+│   │   │   │   └── ReportGenerationAgent.java  # Markdown 综合报告生成
+│   │   │   └── model/
+│   │   │       ├── DataQueryRequest.java
+│   │   │       ├── DataQueryResult.java
+│   │   │       ├── ChartSpec.java
+│   │   │       ├── DashboardSpec.java
+│   │   │       ├── Nl2SqlResult.java
+│   │   │       ├── InsightResult.java
+│   │   │       ├── DataAnalysisReport.java
+│   │   │       ├── MultiAnalysisReport.java    # 多 Agent 协作分析聚合报告
+│   │   │       └── SqlValidationResult.java
+│   │   ├── tool/ hook/ permission/ memory/ agent/ plan/ task/ skill/  # 同前
+│   ├── tools/                             # 内置工具实现（同前）
+│   ├── entity/                            # JPA 实体（同前）
 │   └── repository/                        # Spring Data JPA Repository
 └── src/main/resources/
-    ├── application.yml                    # 主配置
-    └── application-dev.yml               # 开发配置（H2 Console，show-sql）
+    ├── application.yml                    # 主配置（含 security.jwt.* 配置节）
+    ├── application-dev.yml               # 开发配置（H2 Console，show-sql）
+    └── application-postgres.yml          # PostgreSQL profile（data-agent 外部数据源）
 ```
 
 ---
@@ -144,7 +153,7 @@ javacodeagent/
 - Maven 3.8+
 - LLM API Key（Anthropic / DeepSeek / OpenAI 等）
 
-### 启动
+### 启动（本地 JVM）
 
 ```bash
 cd D:/workspace/javacodeagent
@@ -160,6 +169,23 @@ mvn spring-boot:run -Dspring-boot.run.profiles=dev
 ```
 
 应用启动后监听 `http://localhost:8080`。
+
+### 启动（Docker — H2 内嵌，开箱即用）
+
+```bash
+export LLM_API_KEY=sk-ant-xxx
+docker compose up --build          # 首次构建约 2-3 分钟
+```
+
+### 启动（Docker — PostgreSQL 生产模式）
+
+```bash
+export LLM_API_KEY=sk-ant-xxx
+export POSTGRES_PASSWORD=changeme
+docker compose -f docker-compose-pg.yml up --build
+```
+
+PostgreSQL 模式下，Data Agent 的 NL2SQL 分析查询将直接指向外部 PostgreSQL（`data-agent.datasource.*`），Spring JPA 实体（对话/任务/计划）仍使用 H2 内嵌存储。
 
 ### 核心配置
 
@@ -193,7 +219,10 @@ memory:
   index-file: MEMORY.md
 
 security:
-  api-key: ""                   # 留空则关闭 HTTP API 认证
+  api-key: ""                   # 留空则关闭 HTTP API Key 认证
+  jwt:
+    secret: ""                  # 非空时启用 JWT 认证（优先于 api-key）
+    ttl-hours: 24               # JWT 令牌有效期（小时）
 
 mcp:
   enabled: false
@@ -321,6 +350,192 @@ DELETE /api/v1/memory/{userId}/{memoryId}          # 删除记忆
 
 记忆类型：`USER` / `FEEDBACK` / `PROJECT` / `REFERENCE`
 
+### Data Agent（数据分析智能体）
+
+#### 配置
+
+```yaml
+# application.yml
+data-agent:
+  dialect: h2          # h2 | mysql | postgresql
+  db-name: PUBLIC      # H2 默认 Schema；MySQL 填数据库名；PostgreSQL 填 public
+```
+
+#### `POST /api/v1/data-agent/query` — 完整 NL→SQL→执行→洞察
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "统计各地区月销售额趋势", "maxRows": 200}'
+```
+
+**响应：**
+```json
+{
+  "question": "统计各地区月销售额趋势",
+  "success": true,
+  "chartSpec": {
+    "sql": "SELECT region, month, SUM(amount) FROM sales GROUP BY region, month",
+    "displayType": "response_line_chart",
+    "thought": "按地区和月份聚合，折线图对比各地区趋势",
+    "data": [{"region":"华东","month":"2024-01","total":1200000}]
+  },
+  "insightMarkdown": "## 销售趋势分析\n华东地区 1 月增长最显著..."
+}
+```
+
+#### `POST /api/v1/data-agent/query/stream` — SSE 流式分析
+
+```bash
+curl -N -X POST http://localhost:8080/api/v1/data-agent/query/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "各产品销量排名前10"}'
+```
+
+**SSE 事件流：**
+```
+data: {"type":"started","question":"各产品销量排名前10"}
+data: {"type":"schema_retrieved","length":2048}
+data: {"type":"sql_generated","sql":"SELECT ...","displayType":"response_bar_chart"}
+data: {"type":"sql_executed","rowCount":10}
+data: {"type":"insight_ready","markdown":"## 分析结论\n..."}
+data: {"type":"done"}
+```
+
+| 事件类型 | 关键字段 | 说明 |
+|----------|---------|------|
+| `started` | question | 开始处理 |
+| `schema_retrieved` | length | Schema 提取完成（字符数） |
+| `sql_generated` | sql, displayType | LLM 生成 SQL + 图表类型 |
+| `sql_executed` | rowCount | SQL 执行完成，返回行数 |
+| `insight_ready` | markdown | 洞察报告 Markdown |
+| `done` | — | 流结束 |
+| `error` | message | 任意阶段错误 |
+
+#### `POST /api/v1/data-agent/nl2sql` — 仅生成 SQL（不执行，供用户审核）
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/nl2sql \
+  -H "Content-Type: application/json" \
+  -d '{"question": "月活跃用户数量"}'
+# 响应：{"thought":"...","sql":"SELECT ...","displayType":"response_line_chart"}
+```
+
+#### `POST /api/v1/data-agent/execute` — 执行用户确认的 SQL
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/execute \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM users"}'
+# 响应：{"columns":["COUNT(*)"],"rows":[[42]],"totalRows":1}
+```
+
+#### `GET /api/v1/data-agent/schema` — 数据源 Schema 概览
+
+```bash
+curl http://localhost:8080/api/v1/data-agent/schema
+# 响应：{"database":"PUBLIC","dialect":"h2","tables":["ORDERS","USERS"],"tableCount":2}
+```
+
+#### `POST /api/v1/data-agent/dashboard` — 多图 Dashboard
+
+LLM 一次性规划 2-4 张互补图表，每张独立执行 SQL，单图失败不阻断整体渲染（`errMsg` 字段隔离）。
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/dashboard \
+  -H "Content-Type: application/json" \
+  -d '{"question": "生成销售综合看板"}'
+# 响应：{"title":"...","charts":[...],"displayStrategy":"default","chartCount":2}
+```
+
+#### `POST /api/v1/data-agent/multi-analysis` — 多 Agent 协作分析
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/multi-analysis \
+  -H "Content-Type: application/json" \
+  -d '{"question": "分析近3个月销售数据中的异常和波动情况"}'
+```
+
+**响应：**
+```json
+{
+  "question": "分析近3个月销售数据中的异常和波动情况",
+  "sql": "SELECT month, SUM(amount) FROM sales WHERE ...",
+  "rowCount": 36,
+  "anomalies": ["column 'amount' value 999999 — 5× above mean in 2024-11"],
+  "volatilityMetrics": {"cv": 0.38, "trend": "increasing", "peakValue": 999999},
+  "reportMarkdown": "## 执行摘要\n近3个月销售数据整体呈上升趋势...",
+  "success": true
+}
+```
+
+**执行顺序（全程非阻塞 + 虚拟线程）：**
+1. `NL2SQL 管道` → 获取查询数据
+2. `AnomalyDetectorAgent` + `VolatilityAnalysisAgent` → **并行** LLM 分析
+3. `ReportGenerationAgent` → 聚合 Markdown 综合报告
+
+#### `POST /api/v1/auth/token` — 生成 JWT 令牌（需配置 `security.jwt.secret`）
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "alice"}'
+# 响应：{"token": "eyJhbGciOiJIUzI1NiJ9...", "userId": "alice"}
+```
+
+后续携带令牌访问：
+```bash
+curl -X POST http://localhost:8080/api/v1/chat/stream \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{"content": "帮我分析 src/Main.java"}'
+```
+
+#### `POST /api/v1/data-agent/excel/upload` — 上传 Excel/CSV 文件
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/excel/upload \
+  -F "file=@sales.xlsx"
+# 响应：{"tableName":"tbl_a1b2c3d4","filename":"sales.xlsx","schema":"...","status":"imported"}
+```
+
+支持 `.xlsx`、`.csv` 格式。文件数据导入 H2 内存表，列名自动安全化（空格→下划线，去除特殊字符）。
+
+#### `POST /api/v1/data-agent/excel/query` — 针对已上传文件的 NL 查询
+
+```bash
+curl -X POST http://localhost:8080/api/v1/data-agent/excel/query \
+  -H "Content-Type: application/json" \
+  -d '{"tableName": "tbl_a1b2c3d4", "question": "各产品销量排名"}'
+# 响应：DataAnalysisReport（同 /query）
+```
+
+**支持的图表类型（GPT-Vis 协议）：**
+
+| displayType | 适用场景 |
+|-------------|---------|
+| `response_line_chart` | 趋势比较分析 |
+| `response_bar_chart` | 分类对比 |
+| `response_pie_chart` | 比例/分布统计 |
+| `response_table` | 多列或非数值型数据 |
+| `response_scatter_chart` | 变量关系、异常检测 |
+| `response_area_chart` | 时序数据、多组对比 |
+| `response_heatmap` | 大规模时序热力图 |
+| `response_donut_chart` | 层级结构、分类比例 |
+
+**SQL 安全双重防护：**
+
+```
+Prompt 层（NL2SQL system prompt 约束 LLM 只输出 SELECT）
+    +
+SqlValidator 工具层（不可绕过，执行前强制拦截）
+    拦截 12 个危险关键词：
+      INSERT / UPDATE / DELETE / DROP / TRUNCATE / ALTER
+      CREATE / GRANT / REVOKE / EXEC / EXECUTE / MERGE
+    仅放行 SELECT / WITH 前缀语句
+    字符串字面量豁免：WHERE status = 'DELETE' 等合法列值不会误报
+```
+
 ### 技能
 
 ```bash
@@ -341,6 +556,7 @@ POST /api/v1/skills/{name}   # 执行技能，请求体为参数 Map
 | `List` | FILE_READ | path | 列出目录内容（含大小格式化） |
 | `Bash` | SHELL_EXECUTE | command, timeout, run_in_background | Shell 命令执行（boundedElastic 线程） |
 | `Git` | GIT_OPERATION | command, args | Git 操作（白名单命令，引号合法性检测） |
+| `SqlQuery` | DATABASE_READ | sql, max_rows | 只读 SQL 查询（SELECT/WITH），LLM 可在 Agentic Loop 中调用 |
 
 **Git 白名单命令：**
 `status` / `diff` / `log` / `show` / `branch` / `remote` / `add` / `commit` / `checkout` / `switch` / `pull` / `push` / `fetch` / `merge` / `rebase` / `stash` / `tag` / `init` / `clone`
@@ -931,11 +1147,55 @@ McpProxyTool("mcp__fs__read_file")
 
 使用 Streamable HTTP 传输层（JSON-RPC 2.0）。工具命名规范：`mcp__{server-name}__{tool-name}`，避免与内置工具冲突。
 
----
-
 ### 15. API 安全认证
 
-**认证方式：**
+**认证层级（双模式，可共存）：**
+
+```
+JwtAuthFilter (@Order 1)
+    │  security.jwt.secret 已配置？
+    │  YES → 验证 Bearer JWT → 提取 sub claim 为 userId → 写入 exchange attribute
+    │  NO  → 直接放行（JWT 未启用）
+    │
+ApiKeyAuthFilter (@Order 2)
+    │  security.api-key 已配置？
+    │  YES → 验证 Bearer <key> 或 X-API-Key: <key>
+    │  NO  → 直接放行（认证关闭）
+```
+
+**JWT 模式（推荐生产使用）：**
+
+```yaml
+security:
+  jwt:
+    secret: ${JWT_SECRET}     # 至少 32 字符
+    ttl-hours: 24
+```
+
+```bash
+# 1. 获取令牌
+curl -X POST http://localhost:8080/api/v1/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "alice"}'
+# → {"token": "eyJhbGc...", "userId": "alice"}
+
+# 2. 携带令牌调用 API
+curl -H "Authorization: Bearer eyJhbGc..." \
+  http://localhost:8080/api/v1/chat/stream ...
+```
+
+userId 传递链（JWT 模式）：
+```
+JWT sub claim
+    │ JwtAuthFilter.filter()
+    ▼
+exchange.getAttribute("authenticated-user-id")
+    │ ConversationWebSocketHandler.extractUserId()
+    ▼
+ConversationRequest.userId → ContextBuilder → MemoryService / PermissionService
+```
+
+**API Key 模式（简单模式，向后兼容）：**
 
 ```
 配置: security.api-key=your-secret-key（留空则关闭认证）
@@ -944,24 +1204,62 @@ McpProxyTool("mcp__fs__read_file")
   X-API-Key: your-secret-key
 ```
 
-公开路径：`/api/v1/health`、`/h2-console/**`、`/actuator/**`
+公开路径（无需认证）：`/api/v1/health`、`/api/v1/auth/**`、`/h2-console/**`、`/actuator/**`
 
-**多用户 userId 传递链：**
+---
+
+### 16. 多 Agent 协作分析架构
 
 ```
-HTTP 请求头 X-User-Id
+POST /api/v1/data-agent/multi-analysis
+          │
+          ▼ (boundedElastic)
+    DataAgentPipeline.analyze()        ← NL2SQL 获取原始数据
+          │
+          ▼
+    DataAnalysisAgent.process()        ← 编排器（虚拟线程池）
+          │
+    ┌─────┴─────┐ 并行 (Java 21 virtual threads)
+    │           │
+    ▼           ▼
+AnomalyDetector  VolatilityAnalysis    ← 各自独立 LLM 调用
+    │           │
+    └─────┬─────┘
+          ▼
+    ReportGenerationAgent              ← 聚合两路结果生成 Markdown
+          │
+          ▼
+    MultiAnalysisReport (JSON)
+```
+
+**各 Agent 职责：**
+
+| Agent | 类型标识 | 核心输出 |
+|-------|---------|---------|
+| `DataAnalysisAgent` | `data-analysis` | 编排器，返回 `MultiAnalysisReport` JSON |
+| `AnomalyDetectorAgent` | `anomaly-detector` | 异常列表 JSON 数组（≥3σ 离群值、空值、分布异常） |
+| `VolatilityAnalysisAgent` | `volatility-analysis` | `{cv, trend, peakValue, troughValue, observations}` |
+| `ReportGenerationAgent` | `report-generation` | 5 节 Markdown 综合报告（摘要/发现/异常/趋势/建议） |
+
+---
+
+### 17. 历史 SQL 缓存
+
+```
+Nl2SqlService.generateSql(question, schema)
     │
     ▼
-ConversationWebSocketHandler / ConversationController
-    │  extractUserId() → 填入 ConversationRequest.userId
-    ▼
-ContextBuilder → ConversationContext.userId
-    ▼
-ConversationManager → ExecutionContext.userId
-    ▼
-ToolManager → PermissionService.checkPermission(userId, ...)
-              MemoryService（按 userId 目录隔离）
+SqlCacheService.get(normalizedKey)  ← LRU 500 条 + TTL 1h
+    │
+    ├── 命中 → 直接返回 Nl2SqlResult（跳过 LLM 调用）
+    │
+    └── 未命中 → LLMClient.chat() → parseNl2SqlResult()
+                    │
+                    ▼
+              SqlCacheService.put(key, result)
 ```
+
+Key 标准化：`trim → lowercase → 合并空白 → 移除中英文标点`，使语义相同但标点/大小写不同的问题命中同一缓存。
 
 ---
 
@@ -1010,8 +1308,15 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 | API Key 认证（WebFilter） | ✅ | ✅ |
 | Thinking Mode（Anthropic） | ✅ | ✅ |
 | **向量记忆检索（embedding）** | ✅ | ❌ 待实现 |
-| **容器化（Dockerfile）** | ✅ | ❌ 待实现 |
-| **生产级 OAuth2 / JWT 认证** | ✅ | ❌ 待实现 |
+| **容器化（Dockerfile）** | ✅ | ✅ |
+| **生产级 JWT 认证** | ✅ | ✅ |
+| **数据分析智能体（NL2SQL 全流水线）** | ✅ | ✅ |
+| **Excel/CSV 文件分析** | ✅ | ✅ |
+| **Excel 中文列名 LLM 翻译** | ✅ | ✅ |
+| **GPT-Vis 8 种图表类型** | ✅ | ✅ |
+| **多图 Dashboard** | ✅ | ✅ |
+| **历史 SQL 缓存（LRU+TTL）** | ✅ | ✅ |
+| **多 Agent 协作分析（归因/异常检测）** | ✅ | ✅ |
 
 ---
 
@@ -1022,7 +1327,7 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 - [x] 基础框架（Spring Boot 3.2.5 + WebFlux）
 - [x] Anthropic / OpenAI 兼容 LLM 客户端（Token 级流式）
 - [x] Agentic Loop（消息格式符合 API 规范，最多 10 轮）
-- [x] 工具系统（Read / Write / Edit / Glob / Grep / List / Bash / Git）
+- [x] 工具系统（Read / Write / Edit / Glob / Grep / List / Bash / Git / SqlQuery）
 - [x] 权限模型（四级 + 自动审批 + 路径遍历防护）
 - [x] Hook 机制（7 种类型，可拦截）
 - [x] 记忆系统（文件持久化 + MEMORY.md 索引 + 多用户目录分区）
@@ -1036,12 +1341,25 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 - [x] 集成测试（工具执行、Agentic Loop、SSE 端对端、计划持久化，`@MockBean LLMClient`）
 - [x] 多用户 userId 全链路透传（X-User-Id → PermissionService / MemoryService）
 - [x] Thinking Mode（Anthropic interleaved-thinking）
+- [x] **数据分析智能体（Data Agent）** — NL2SQL 全流水线（Schema 检索 → SQL 生成 → 执行 → 洞察）
+- [x] **Excel/CSV 文件分析** — Apache POI + Commons CSV 导入 H2 内存表，复用 NL2SQL 管道
+- [x] **GPT-Vis 可视化协议** — 8 种图表类型（line / bar / pie / table / scatter / area / heatmap / donut）
+- [x] **Dashboard 多图** — LLM 规划 2-4 张互补图表，错误隔离（err_msg 字段）
+- [x] **SqlQueryTool** — LLM 在 Agentic Loop 中可调用只读 SQL 查询工具
+- [x] **Data Agent 测试** — SqlValidator、ExcelDataSourceConnector、DataAgentPipeline 集成测试
+- [x] **代码质量修复（第三轮检视）** — PostgreSQL 标识符双引号修正；`extractJson()` 支持 markdown 包裹；`ExcelAnalysisController` 使用 InsightGenerator 生成真正洞察；`SqlValidator` 字符串字面量豁免；`DashboardGenerator` Builder 模式
+- [x] **代码质量修复（第四轮检视）** — `SqlValidator` 12 个 Pattern 预编译（消除每次 validate 的 12 次 compile 开销）；`JdbcDataSourceConnector.executeQuery()` 接入 `setQueryTimeout()` + 子查询 LIMIT 括号深度检测；`ExcelAnalysisController.upload()` DataBuffer 内存泄漏修复；`DataAgentPipeline.jsonStr()` 补全 `\t\b\f` 转义；`DashboardGenerator.extractJsonArray()` 非贪婪正则；`ExcelDataSourceConnector` 表名改用 UUID 防碰撞；`PermissionType` 新增 `DATABASE_READ`；`SqlQueryTool` 权限语义修正；`Nl2SqlService.extractJson()` 成对 markdown 代码块正则；新增 `JdbcDataSourceConnectorTest`
+- [x] **代码质量修复（第五轮检视）** — 新增 `DataAgentConstants` 常量类，消除 10 个文件中的硬编码魔法值（200 / 30s / 3 / 10 / `"system"` / conversationId 前缀等）；`DashboardGenerator` 串行 SQL 改为 `Flux.flatMap` 并行执行；`InsightGenerator` 空数据消息语言自适应；`DataAnalysisReport.error()` 新增携带 question 的重载；`ChartSpec.from()` 增加 null guard；`SchemaRetriever` 关键词过滤改用 `codePointCount` 修复中文单字被误过滤 bug
+- [x] **容器化** — `Dockerfile`（maven:3.9 多阶段构建 + JRE 21 非 root 运行）；`docker-compose.yml`（H2 内嵌，开箱即用）；`docker-compose-pg.yml`（PostgreSQL 外部数据源，健康检查，持久化 volume）；`application-postgres.yml`；`DataAgentConfig` 支持 `data-agent.datasource.*` 可选外部数据源
+- [x] **生产级 JWT 认证** — `JwtService`（HMAC-SHA256，sub claim 存 userId，TTL 可配）；`JwtAuthFilter`（`@Order(1)` WebFilter，认证后写 exchange attribute）；`AuthController`（`POST /api/v1/auth/token`，公开路径）；`application.yml` 新增 `security.jwt.*` 配置节；`ConversationWebSocketHandler.extractUserId()` 优先读 JWT attribute
+- [x] **多 Agent 协作分析** — `AnomalyDetectorAgent`（检测统计异常/离群值）；`VolatilityAnalysisAgent`（计算 CV / 趋势 / 极值）；`ReportGenerationAgent`（汇编 Markdown 综合报告）；`DataAnalysisAgent`（编排器，虚拟线程并行）；`MultiAnalysisReport` 模型；`POST /api/v1/data-agent/multi-analysis` 端点
+- [x] **Excel 中文列名翻译** — `ExcelDataSourceConnector` 检测 CJK 字符，调用 LLM 批量翻译为 snake_case 英文（`translateChineseHeaders()`），翻译失败自动降级；适用 .xlsx 和 .csv
+- [x] **历史 SQL 缓存** — `SqlCacheService`（LRU 500 条 + TTL 1h，`Collections.synchronizedMap(LinkedHashMap)`）；`Nl2SqlService.generateSql()` 先查缓存再调 LLM，命中时跳过 LLM 调用
 
 ### 待实现
 
 - [ ] **向量记忆检索** — embedding 相似度替换关键词匹配（P1）
-- [ ] **容器化** — Dockerfile + docker-compose（含 PostgreSQL 替换 H2）（P2）
-- [ ] **生产级认证** — OAuth2 / JWT，userId 从 Token claims 提取（P2）
+- [ ] **Schema Linking 向量检索** — Embedding + ChromaDB/Milvus 替换关键词匹配（P2）
 
 ---
 

@@ -1,5 +1,6 @@
 package com.javacodeagent.core.data;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.DataQueryResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,11 +17,8 @@ public class SqlExecutor {
 
     private final DataSourceConnector connector;
 
-    private static final int DEFAULT_MAX_ROWS = 200;
-    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
-
     public Mono<DataQueryResult> execute(String sql) {
-        return execute(sql, DEFAULT_MAX_ROWS, DEFAULT_TIMEOUT);
+        return execute(sql, DataAgentConstants.DEFAULT_MAX_ROWS, DataAgentConstants.DEFAULT_QUERY_TIMEOUT);
     }
 
     public Mono<DataQueryResult> execute(String sql, int maxRows, Duration timeout) {

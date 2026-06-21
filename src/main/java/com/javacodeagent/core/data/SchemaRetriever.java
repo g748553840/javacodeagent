@@ -45,7 +45,7 @@ public class SchemaRetriever {
     private List<String> selectByKeyword(String question, List<String> tables) {
         String lower = question.toLowerCase();
         Set<String> keywords = new HashSet<>(Arrays.asList(lower.split("[\\s,，。？！、\\-_]+")));
-        keywords.removeIf(k -> k.length() < 2);
+        keywords.removeIf(k -> k.codePointCount(0, k.length()) < 2);
 
         return tables.stream()
             .sorted(Comparator.comparingInt((String t) -> -scoreTable(t.toLowerCase(), keywords)))

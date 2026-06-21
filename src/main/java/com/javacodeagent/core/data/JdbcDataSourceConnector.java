@@ -1,19 +1,17 @@
 package com.javacodeagent.core.data;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.DataQueryResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
-
-import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
 public class JdbcDataSourceConnector implements DataSourceConnector {
-
-    private static final int DEFAULT_SAMPLE_ROWS = 3;
 
     private final JdbcTemplate jdbc;
     private final String dialect;
@@ -55,7 +53,7 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
         for (String table : tableNames) {
             try {
                 sb.append(buildCreateTableDdl(table)).append("\n\n");
-                sb.append("/*\n").append(DEFAULT_SAMPLE_ROWS)
+                sb.append("/*\n").append(DataAgentConstants.DEFAULT_SAMPLE_ROWS)
                   .append(" rows from ").append(table).append(":\n");
                 sb.append(buildSampleRows(table));
                 sb.append("*/\n\n");
@@ -71,12 +69,33 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
     @Override
     public DataQueryResult executeQuery(String sql, int maxRows, Duration timeout) {
         String limitedSql = appendLimit(sql, maxRows);
+        int timeoutSeconds = timeout != null ? (int) Math.max(1, timeout.getSeconds()) : (int) DataAgentConstants.DEFAULT_QUERY_TIMEOUT.getSeconds();
         try {
-            List<Map<String, Object>> rows = jdbc.queryForList(limitedSql);
-            if (rows.isEmpty()) return DataQueryResult.empty(sql);
-
-            List<String> columns = new ArrayList<>(rows.get(0).keySet());
-            List<List<Object>> data = rows.stream()
+            List<Map<String, Object>> result = jdbc.execute(
+                con -> {
+                    java.sql.PreparedStatement ps = con.prepareStatement(limitedSql);
+                    ps.setQueryTimeout(timeoutSeconds);
+                    return ps;
+                },
+                ps -> {
+                    try (java.sql.ResultSet rs = ps.executeQuery()) {
+                        java.sql.ResultSetMetaData meta = rs.getMetaData();
+                        int colCount = meta.getColumnCount();
+                        List<String> labels = new ArrayList<>();
+                        for (int i = 1; i <= colCount; i++) labels.add(meta.getColumnLabel(i));
+                        List<Map<String, Object>> rows = new ArrayList<>();
+                        while (rs.next()) {
+                            Map<String, Object> row = new LinkedHashMap<>();
+                            for (int i = 1; i <= colCount; i++) row.put(labels.get(i - 1), rs.getObject(i));
+                            rows.add(row);
+                        }
+                        return rows;
+                    }
+                }
+            );
+            if (result == null || result.isEmpty()) return DataQueryResult.empty(sql);
+            List<String> columns = new ArrayList<>(result.get(0).keySet());
+            List<List<Object>> data = result.stream()
                 .map(r -> new ArrayList<Object>(r.values()))
                 .collect(Collectors.toList());
             return new DataQueryResult(columns, data, data.size(), sql);
@@ -119,8 +138,9 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
     private String buildSampleRows(String table) {
         try {
             String q = switch (dialect) {
-                case "mysql", "postgresql" -> "SELECT * FROM `" + table + "` LIMIT " + DEFAULT_SAMPLE_ROWS;
-                default -> "SELECT * FROM \"" + table + "\" LIMIT " + DEFAULT_SAMPLE_ROWS;
+                case "mysql" -> "SELECT * FROM `" + table + "` LIMIT " + DataAgentConstants.DEFAULT_SAMPLE_ROWS;
+                case "postgresql" -> "SELECT * FROM \"" + table + "\" LIMIT " + DataAgentConstants.DEFAULT_SAMPLE_ROWS;
+                default -> "SELECT * FROM \"" + table + "\" LIMIT " + DataAgentConstants.DEFAULT_SAMPLE_ROWS;
             };
             List<Map<String, Object>> rows = jdbc.queryForList(q);
             if (rows.isEmpty()) return "(empty table)\n";
@@ -134,10 +154,28 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
         }
     }
 
+    /**
+     * 仅在最外层（括号深度为 0）没有 LIMIT 子句时才追加，
+     * 避免误判子查询中的 LIMIT（如 SELECT * FROM (SELECT id LIMIT 10) sub）。
+     */
     private String appendLimit(String sql, int maxRows) {
         String trimmed = sql.trim();
-        String upper = trimmed.toUpperCase();
-        if (upper.contains(" LIMIT ")) return trimmed;
+        if (hasOuterLimit(trimmed.toUpperCase())) return trimmed;
         return trimmed + " LIMIT " + maxRows;
+    }
+
+    private boolean hasOuterLimit(String upper) {
+        int depth = 0;
+        for (int i = 0; i < upper.length(); i++) {
+            char c = upper.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            } else if (depth == 0 && upper.startsWith(" LIMIT ", i)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

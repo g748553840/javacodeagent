@@ -1,5 +1,6 @@
 package com.javacodeagent.core.data;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.ChartSpec;
 import com.javacodeagent.core.data.model.DataAnalysisReport;
 import com.javacodeagent.core.data.model.DataQueryRequest;
@@ -13,9 +14,10 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+
+import reactor.core.scheduler.Schedulers;
 
 @Slf4j
 @Service
@@ -49,30 +51,49 @@ public class DataAgentPipeline {
 
     // ── 流式分析（SSE 进度事件） ─────────────────────────────────────────────
 
+    /**
+     * 逐步推送分析进度（schema_retrieved → sql_generated → sql_executed → insight_ready → done）。
+     * <p>
+     * 使用 Flux.concat 链式组合而非 Flux.create + subscribe（Reactor 嵌套订阅反模式），
+     * 保证背压传播正确，防止在高并发下内存积压。
+     */
     public Flux<String> analyzeStream(DataQueryRequest request) {
-        return Flux.create(sink -> {
-            sink.next("{\"type\":\"started\",\"question\":\"" + request.getQuestion() + "\"}");
+        String startedEvent = "{\"type\":\"started\",\"question\":" + jsonStr(request.getQuestion()) + "}";
 
-            schemaRetriever.retrieve(request.getQuestion())
-                .doOnNext(schema -> sink.next("{\"type\":\"schema_retrieved\",\"length\":" + schema.length() + "}"))
-                .flatMap(schema -> nl2SqlService.generateSql(request.getQuestion(), schema))
-                .doOnNext(r -> sink.next("{\"type\":\"sql_generated\",\"sql\":" + jsonStr(r.getSql()) +
-                    ",\"displayType\":" + jsonStr(r.getDisplayType()) + "}"))
-                .flatMap(nl2SqlResult -> validateAndExecute(nl2SqlResult, request.getMaxRows()))
-                .doOnNext(cs -> sink.next("{\"type\":\"sql_executed\",\"rowCount\":" + (cs.getData() != null ? cs.getData().size() : 0) + "}"))
-                .flatMap(chartSpec -> insightGenerator.generate(request.getQuestion(), chartSpec))
-                .subscribe(
-                    insight -> {
-                        sink.next("{\"type\":\"insight_ready\",\"markdown\":" + jsonStr(insight.markdown()) + "}");
-                        sink.next("{\"type\":\"done\"}");
-                        sink.complete();
-                    },
-                    err -> {
-                        sink.next("{\"type\":\"error\",\"message\":" + jsonStr(err.getMessage()) + "}");
-                        sink.complete();
-                    }
+        Flux<String> pipeline = schemaRetriever.retrieve(request.getQuestion())
+            .flatMapMany(schema -> {
+                String schemaEvent = "{\"type\":\"schema_retrieved\",\"length\":" + schema.length() + "}";
+                return Flux.concat(
+                    Flux.just(schemaEvent),
+                    nl2SqlService.generateSql(request.getQuestion(), schema)
+                        .flatMapMany(nl2SqlResult -> {
+                            String sqlEvent = "{\"type\":\"sql_generated\",\"sql\":" + jsonStr(nl2SqlResult.getSql())
+                                + ",\"displayType\":" + jsonStr(nl2SqlResult.getDisplayType()) + "}";
+                            return Flux.concat(
+                                Flux.just(sqlEvent),
+                                validateAndExecute(nl2SqlResult, request.getMaxRows())
+                                    .flatMapMany(chartSpec -> {
+                                        int rowCount = chartSpec.getData() != null ? chartSpec.getData().size() : 0;
+                                        String execEvent = "{\"type\":\"sql_executed\",\"rowCount\":" + rowCount + "}";
+                                        return Flux.concat(
+                                            Flux.just(execEvent),
+                                            insightGenerator.generate(request.getQuestion(), chartSpec)
+                                                .flatMapMany(insight -> Flux.just(
+                                                    "{\"type\":\"insight_ready\",\"markdown\":" + jsonStr(insight.markdown()) + "}",
+                                                    "{\"type\":\"done\"}"
+                                                ))
+                                        );
+                                    })
+                            );
+                        })
                 );
-        });
+            });
+
+        return Flux.concat(Flux.just(startedEvent), pipeline)
+            .onErrorResume(err -> Flux.just(
+                "{\"type\":\"error\",\"message\":" + jsonStr(err.getMessage()) + "}",
+                "{\"type\":\"done\"}"
+            ));
     }
 
     // ── 仅生成 SQL（不执行） ──────────────────────────────────────────────────
@@ -89,7 +110,7 @@ public class DataAgentPipeline {
         if (!valid.isAllowed()) {
             return Mono.error(new IllegalArgumentException("SQL rejected: " + valid.reason()));
         }
-        return sqlExecutor.execute(sql, 200, Duration.ofSeconds(30));
+        return sqlExecutor.execute(sql, DataAgentConstants.DEFAULT_MAX_ROWS, DataAgentConstants.DEFAULT_QUERY_TIMEOUT);
     }
 
     // ── Dashboard（多图） ─────────────────────────────────────────────────────
@@ -100,14 +121,21 @@ public class DataAgentPipeline {
 
     // ── Schema 信息 ───────────────────────────────────────────────────────────
 
+    /**
+     * 返回当前数据源的 Schema 概要（表名列表、方言、数据库名）。
+     * listTables() 是阻塞 JDBC 调用，必须切换到 boundedElastic 线程，
+     * 否则会阻塞 Netty IO 事件循环。
+     */
     public Mono<Map<String, Object>> getSchema() {
-        List<String> tables = connector.listTables();
-        return Mono.just(Map.of(
-            "database", connector.getDatabaseName(),
-            "dialect", connector.getDialect(),
-            "tables", tables,
-            "tableCount", tables.size()
-        ));
+        return Mono.fromCallable(() -> {
+            List<String> tables = connector.listTables();
+            return Map.<String, Object>of(
+                "database", connector.getDatabaseName(),
+                "dialect", connector.getDialect(),
+                "tables", tables,
+                "tableCount", tables.size()
+            );
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -117,13 +145,19 @@ public class DataAgentPipeline {
         if (!valid.isAllowed()) {
             return Mono.error(new IllegalArgumentException("SQL rejected: " + valid.reason()));
         }
-        return sqlExecutor.execute(nl2SqlResult.getSql(), maxRows, Duration.ofSeconds(30))
+        return sqlExecutor.execute(nl2SqlResult.getSql(), maxRows, DataAgentConstants.DEFAULT_QUERY_TIMEOUT)
             .map(qr -> ChartSpec.from(nl2SqlResult, qr));
     }
 
     private String jsonStr(String value) {
         if (value == null) return "null";
-        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
-            .replace("\n", "\\n").replace("\r", "\\r") + "\"";
+        return "\"" + value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+            .replace("\b", "\\b")
+            .replace("\f", "\\f") + "\"";
     }
 }

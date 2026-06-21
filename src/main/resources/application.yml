@@ -96,9 +96,18 @@ tasks:
   max-concurrent: 10
 
 security:
-  # 留空或不配置则关闭认证；配置后所有 API 请求须携带：
+  # ── API Key 认证（简单模式）────────────────────────────────────────────────
+  # 留空或不配置则关闭 API Key 认证；配置后所有 API 请求须携带：
   #   Authorization: Bearer <api-key>  或  X-API-Key: <api-key>
   api-key: ${AGENT_API_KEY:}
+
+  # ── JWT 认证（生产模式，优先于 API Key）──────────────────────────────────
+  # 配置 secret 后，JWT 模式自动激活，API Key 认证退化为 fallback。
+  # userId 从 JWT sub claim 提取，无需客户端传递 X-User-Id 头。
+  # 生成令牌：POST /api/v1/auth/token {"userId":"alice"}（需配置 secret）
+  jwt:
+    secret: ${JWT_SECRET:}          # 至少 32 字符；留空则禁用 JWT 认证
+    ttl-hours: ${JWT_TTL_HOURS:24}  # 令牌有效期（小时），默认 24h
 
 mcp:
   # 是否启用 MCP 协议客户端（默认关闭）

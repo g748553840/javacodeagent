@@ -1,11 +1,17 @@
 package com.javacodeagent.controller;
 
 import com.javacodeagent.core.data.DataAgentPipeline;
+import com.javacodeagent.core.data.agent.DataAnalysisAgent;
 import com.javacodeagent.core.data.model.DataAnalysisReport;
 import com.javacodeagent.core.data.model.DashboardSpec;
 import com.javacodeagent.core.data.model.DataQueryRequest;
 import com.javacodeagent.core.data.model.DataQueryResult;
+import com.javacodeagent.core.data.model.MultiAnalysisReport;
 import com.javacodeagent.core.data.model.Nl2SqlResult;
+import com.javacodeagent.core.agent.AgentContext;
+import com.javacodeagent.core.agent.AgentResult;
+import com.javacodeagent.core.agent.AgentTask;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -14,12 +20,13 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.Map;
+import java.util.UUID;
 
 @Slf4j
 @RestController
@@ -28,6 +35,8 @@ import java.util.Map;
 public class DataAgentController {
 
     private final DataAgentPipeline pipeline;
+    private final DataAnalysisAgent dataAnalysisAgent;
+    private final ObjectMapper objectMapper;
 
     /**
      * 完整 NL→SQL→执行→洞察分析。
@@ -85,11 +94,54 @@ public class DataAgentController {
 
     /**
      * 获取数据库 Schema 概览。
+     * 当前为单数据源模式；多数据源路由可在 DataAgentPipeline.getSchema() 中扩展。
      */
     @GetMapping("/schema")
-    public Mono<ResponseEntity<Map<String, Object>>> schema(
-            @RequestParam(defaultValue = "default") String dataSourceId) {
+    public Mono<ResponseEntity<Map<String, Object>>> schema() {
         return pipeline.getSchema()
             .map(ResponseEntity::ok);
+    }
+
+    /**
+     * 多 Agent 协作分析（异常检测 + 波动分析 + 综合报告）。
+     *
+     * <p>执行顺序：
+     * <ol>
+     *   <li>NL2SQL 管道获取查询数据</li>
+     *   <li>AnomalyDetectorAgent + VolatilityAnalysisAgent 并行分析</li>
+     *   <li>ReportGenerationAgent 生成 Markdown 综合报告</li>
+     * </ol>
+     *
+     * <p>全程在 boundedElastic 线程上执行（含 LLM .block() 调用），不阻塞 Netty IO 线程。
+     */
+    @PostMapping("/multi-analysis")
+    public Mono<ResponseEntity<MultiAnalysisReport>> multiAnalysis(@RequestBody DataQueryRequest request) {
+        return Mono.fromCallable(() -> {
+            DataAnalysisReport baseReport = pipeline.analyze(request).block();
+            if (baseReport == null || !baseReport.isSuccess()) {
+                String msg = baseReport != null ? baseReport.getErrorMessage() : "Pipeline returned null";
+                return ResponseEntity.ok(MultiAnalysisReport.error(request.getQuestion(), msg));
+            }
+            AgentTask task = AgentTask.builder()
+                .type("data-analysis")
+                .description(request.getQuestion())
+                .parameters(Map.of("report", baseReport, "question", request.getQuestion()))
+                .build();
+            AgentContext ctx = AgentContext.builder()
+                .agentId(UUID.randomUUID().toString())
+                .build();
+            AgentResult result = dataAnalysisAgent.process(task, ctx);
+            if (!result.isSuccess()) {
+                return ResponseEntity.ok(MultiAnalysisReport.error(request.getQuestion(), result.getError()));
+            }
+            MultiAnalysisReport report = objectMapper.readValue(result.getOutput(), MultiAnalysisReport.class);
+            return ResponseEntity.ok(report);
+        })
+        .subscribeOn(Schedulers.boundedElastic())
+        .onErrorResume(e -> {
+            log.error("Multi-analysis failed for question: {}", request.getQuestion(), e);
+            return Mono.just(ResponseEntity.ok(
+                MultiAnalysisReport.error(request.getQuestion(), e.getMessage())));
+        });
     }
 }

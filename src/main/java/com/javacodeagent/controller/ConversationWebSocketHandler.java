@@ -2,13 +2,19 @@ package com.javacodeagent.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.javacodeagent.config.JwtAuthFilter;
 import com.javacodeagent.core.conversation.ConversationManager;
 import com.javacodeagent.core.conversation.ConversationRequest;
 import com.javacodeagent.core.conversation.ConversationResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -62,10 +68,12 @@ public class ConversationWebSocketHandler {
     // -------------------------------------------------------------------------
 
     /**
-     * 从请求头 X-User-Id 提取 userId，未提供则退化为 "default"。
-     * 客户端可在每次请求中通过此头声明身份，实现多用户隔离。
+     * 提取 userId：优先读取 JWT 过滤器注入的 attribute（当 JWT 认证激活时），
+     * 降级到 X-User-Id 请求头，最终默认为 "default"。
      */
     private String extractUserId(ServerWebExchange exchange) {
+        Object jwtUserId = exchange.getAttribute(JwtAuthFilter.USER_ID_ATTR);
+        if (jwtUserId != null) return jwtUserId.toString();
         String userId = exchange.getRequest().getHeaders().getFirst("X-User-Id");
         return (userId != null && !userId.isBlank()) ? userId.trim() : "default";
     }

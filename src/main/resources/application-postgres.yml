@@ -1,0 +1,22 @@
+# PostgreSQL profile — activated by SPRING_PROFILES_ACTIVE=postgres (see docker-compose-pg.yml)
+#
+# Architecture:
+#   - Spring JPA entities (conversations / tasks / plans / messages) → H2 embedded (unchanged)
+#   - Data Agent NL2SQL analysis queries → external PostgreSQL via data-agent.datasource
+#   - Excel/CSV import → H2 embedded (unchanged, uses in-memory tables)
+#
+# This separation means the agent's internal state is always portable (H2),
+# while production data analysis targets the PostgreSQL database.
+
+data-agent:
+  dialect: postgresql
+  db-name: ${POSTGRES_DB:agentdb}
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:agentdb}
+    username: ${POSTGRES_USER:agent}
+    password: ${POSTGRES_PASSWORD:agentsecret}
+    driver-class-name: org.postgresql.Driver
+
+logging:
+  level:
+    com.javacodeagent: INFO

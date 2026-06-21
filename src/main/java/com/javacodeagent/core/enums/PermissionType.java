@@ -7,5 +7,6 @@ public enum PermissionType {
     SHELL_EXECUTE,
     NETWORK_REQUEST,
     GIT_OPERATION,
-    CONFIG_MODIFY
+    CONFIG_MODIFY,
+    DATABASE_READ
 }

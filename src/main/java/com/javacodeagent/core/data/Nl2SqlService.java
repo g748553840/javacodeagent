@@ -1,5 +1,6 @@
 package com.javacodeagent.core.data;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -54,18 +55,30 @@ public class Nl2SqlService {
     private final LLMClient llmClient;
     private final DataSourceConnector connector;
     private final ObjectMapper objectMapper;
+    private final SqlCacheService sqlCacheService;
 
     public Mono<Nl2SqlResult> generateSql(String question, String schema) {
+        // Cache check — identical normalized questions reuse prior SQL without an LLM call
+        return sqlCacheService.get(question)
+            .map(cached -> {
+                log.debug("SQL cache hit for question: {}", question);
+                return Mono.just(cached);
+            })
+            .orElseGet(() -> generateSqlFromLlm(question, schema)
+                .doOnSuccess(result -> sqlCacheService.put(question, result)));
+    }
+
+    private Mono<Nl2SqlResult> generateSqlFromLlm(String question, String schema) {
         String systemPrompt = NL2SQL_SYSTEM_PROMPT
             .replace("{db_name}", connector.getDatabaseName())
             .replace("{dialect}", connector.getDialect())
             .replace("{table_info}", schema)
-            .replace("{max_results}", "200")
+            .replace("{max_results}", String.valueOf(DataAgentConstants.DEFAULT_MAX_ROWS))
             .replace("{display_types}", DISPLAY_TYPES);
 
         ConversationContext ctx = ConversationContext.builder()
-            .conversationId("nl2sql-" + UUID.randomUUID())
-            .userId("system")
+            .conversationId(DataAgentConstants.CONV_PREFIX_NL2SQL + UUID.randomUUID())
+            .userId(DataAgentConstants.SYSTEM_USER_ID)
             .permissionLevel(PermissionLevel.READ_ONLY)
             .messages(List.of(
                 Message.builder().type(MessageType.SYSTEM).content(systemPrompt).build(),
@@ -96,10 +109,14 @@ public class Nl2SqlService {
 
     private String extractJson(String text) {
         if (text == null) return "{}";
-        // Try to extract first JSON object from text
+        // 1. 成对去除 markdown 代码块包装（```json...``` 或 ```...```），不误删内容中的反引号
+        String cleaned = text.replaceAll("(?s)```(?:json)?\\n?([\\s\\S]*?)```", "$1").trim();
+        // 2. 如果清理后直接以 { 开头，让 Jackson 解析（支持任意嵌套深度）
+        if (cleaned.startsWith("{")) return cleaned;
+        // 3. 兜底：尝试提取第一个 JSON 对象（最多支持两层嵌套）
         Pattern p = Pattern.compile("\\{[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\}", Pattern.DOTALL);
-        Matcher m = p.matcher(text);
+        Matcher m = p.matcher(cleaned);
         if (m.find()) return m.group();
-        return text.trim();
+        return "{}";
     }
 }

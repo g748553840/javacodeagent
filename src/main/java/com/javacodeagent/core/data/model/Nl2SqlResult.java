@@ -1,5 +1,6 @@
 package com.javacodeagent.core.data.model;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -13,5 +14,5 @@ public class Nl2SqlResult {
     private String thought;
     private String sql;
     @Builder.Default
-    private String displayType = "response_table";
+    private String displayType = DataAgentConstants.DEFAULT_DISPLAY_TYPE;
 }

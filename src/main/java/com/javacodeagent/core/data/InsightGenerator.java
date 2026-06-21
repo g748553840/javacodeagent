@@ -1,5 +1,6 @@
 package com.javacodeagent.core.data;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.ChartSpec;
 import com.javacodeagent.core.data.model.InsightResult;
 import com.javacodeagent.core.enums.MessageType;
@@ -43,11 +44,13 @@ public class InsightGenerator {
 
     public Mono<InsightResult> generate(String question, ChartSpec chartSpec) {
         if (chartSpec.getData() == null || chartSpec.getData().isEmpty()) {
-            return Mono.just(new InsightResult(chartSpec, "Query returned no data."));
+            String emptyMsg = detectLanguage(question).equals("Chinese")
+                ? "查询未返回数据。" : "Query returned no data.";
+            return Mono.just(new InsightResult(chartSpec, emptyMsg));
         }
 
-        String dataSample = formatDataSample(chartSpec.getData(), 10);
-        int sampleSize = Math.min(10, chartSpec.getData().size());
+        String dataSample = formatDataSample(chartSpec.getData(), DataAgentConstants.DEFAULT_INSIGHT_SAMPLE_ROWS);
+        int sampleSize = Math.min(DataAgentConstants.DEFAULT_INSIGHT_SAMPLE_ROWS, chartSpec.getData().size());
         String lang = detectLanguage(question);
 
         String prompt = INSIGHT_PROMPT
@@ -58,8 +61,8 @@ public class InsightGenerator {
             .replace("{lang}", lang);
 
         ConversationContext ctx = ConversationContext.builder()
-            .conversationId("insight-" + UUID.randomUUID())
-            .userId("system")
+            .conversationId(DataAgentConstants.CONV_PREFIX_INSIGHT + UUID.randomUUID())
+            .userId(DataAgentConstants.SYSTEM_USER_ID)
             .permissionLevel(PermissionLevel.READ_ONLY)
             .messages(List.of(
                 Message.builder().type(MessageType.USER).content(prompt).build()

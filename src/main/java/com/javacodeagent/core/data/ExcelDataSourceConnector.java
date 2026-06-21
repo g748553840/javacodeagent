@@ -1,6 +1,14 @@
 package com.javacodeagent.core.data;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.DataQueryResult;
+import com.javacodeagent.core.enums.MessageType;
+import com.javacodeagent.core.enums.PermissionLevel;
+import com.javacodeagent.core.llm.LLMClient;
+import com.javacodeagent.core.model.ConversationContext;
+import com.javacodeagent.core.model.Message;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -19,16 +27,19 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * 将 Excel / CSV 字节流载入 H2 内存表，随后通过 JdbcDataSourceConnector 用 NL2SQL 分析。
  * 每次 importFile() 生成唯一表名，返回给调用方用于后续查询。
+ *
+ * <p>中文列名翻译：若检测到表头含有 CJK 字符，自动调用 LLM 将中文表头转换为
+ * snake_case 英文列名（如 "销售额" → "sales_amount"），提升 NL2SQL 生成质量。
  */
 @Slf4j
 @Service
@@ -37,9 +48,13 @@ public class ExcelDataSourceConnector {
     private static final Pattern UNSAFE = Pattern.compile("[^a-zA-Z0-9]");
 
     private final JdbcTemplate jdbc;
+    private final LLMClient llmClient;
+    private final ObjectMapper objectMapper;
 
-    public ExcelDataSourceConnector(JdbcTemplate jdbc) {
+    public ExcelDataSourceConnector(JdbcTemplate jdbc, LLMClient llmClient, ObjectMapper objectMapper) {
         this.jdbc = jdbc;
+        this.llmClient = llmClient;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -47,7 +62,8 @@ public class ExcelDataSourceConnector {
      * 支持 .xlsx / .csv 格式。
      */
     public String importFile(byte[] bytes, String filename) throws IOException {
-        String tableName = "tbl_" + Long.toHexString(System.nanoTime()).substring(0, 8);
+        // UUID 保证唯一性，避免高并发下 nanoTime 截断后 8 位碰撞导致数据混入同一张表
+        String tableName = "tbl_" + UUID.randomUUID().toString().replace("-", "").substring(0, DataAgentConstants.TABLE_NAME_UUID_LENGTH);
         if (filename.endsWith(".xlsx") || filename.endsWith(".xls")) {
             importExcel(bytes, tableName);
         } else if (filename.endsWith(".csv")) {
@@ -65,12 +81,13 @@ public class ExcelDataSourceConnector {
     public String getTableInfo(String tableName) {
         try {
             List<String> columns = getColumns(tableName);
-            List<String> sampleRows = getSampleRows(tableName, 3);
+            List<String> sampleRows = getSampleRows(tableName, DataAgentConstants.DEFAULT_SAMPLE_ROWS);
             StringBuilder sb = new StringBuilder();
             sb.append("CREATE TABLE \"").append(tableName).append("\" (\n");
             columns.forEach(c -> sb.append("  \"").append(c).append("\" VARCHAR(1000),\n"));
             if (!columns.isEmpty()) sb.setLength(sb.length() - 2);
-            sb.append("\n)\n\n/* 3 rows from ").append(tableName).append(":\n");
+            sb.append("\n)\n\n/* ").append(DataAgentConstants.DEFAULT_SAMPLE_ROWS)
+              .append(" rows from ").append(tableName).append(":\n");
             sb.append(String.join("\n", sampleRows)).append("\n*/\n");
             return sb.toString();
         } catch (Exception e) {
@@ -107,10 +124,16 @@ public class ExcelDataSourceConnector {
 
             DataFormatter formatter = new DataFormatter();
             Row headerRow = rowIt.next();
-            List<String> headers = new ArrayList<>();
+            List<String> rawHeaders = new ArrayList<>();
             for (Cell cell : headerRow) {
-                headers.add(toSafeColName(formatter.formatCellValue(cell)));
+                rawHeaders.add(formatter.formatCellValue(cell));
             }
+
+            // Translate Chinese headers to snake_case English if CJK chars detected
+            List<String> translatedHeaders = translateChineseHeaders(rawHeaders);
+            List<String> headers = translatedHeaders.stream()
+                .map(this::toSafeColName)
+                .collect(Collectors.toList());
 
             createTable(tableName, headers);
 
@@ -134,7 +157,11 @@ public class ExcelDataSourceConnector {
                 CSVFormat.DEFAULT.builder().setHeader().setSkipHeaderRecord(true).build())) {
 
             List<String> rawHeaders = parser.getHeaderNames();
-            List<String> headers = rawHeaders.stream().map(this::toSafeColName).collect(Collectors.toList());
+            // Translate Chinese headers to snake_case English if CJK chars detected
+            List<String> translatedHeaders = translateChineseHeaders(rawHeaders);
+            List<String> headers = translatedHeaders.stream()
+                .map(this::toSafeColName)
+                .collect(Collectors.toList());
             createTable(tableName, headers);
 
             for (CSVRecord record : parser) {
@@ -145,6 +172,71 @@ public class ExcelDataSourceConnector {
                 }
                 insertRow(tableName, headers, values);
             }
+        }
+    }
+
+    // ── Chinese Header Translation ────────────────────────────────────────────
+
+    /**
+     * 检测表头中是否含有 CJK（中文/日文/韩文）字符。
+     * 覆盖 CJK 统一汉字（U+4E00–U+9FFF）和扩展区 A（U+3400–U+4DBF）。
+     */
+    private boolean hasCjkChars(String s) {
+        return s != null && s.codePoints().anyMatch(cp ->
+            (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF));
+    }
+
+    /**
+     * 若列名列表中含有 CJK 字符，则调用 LLM 批量翻译为 snake_case 英文列名。
+     * 翻译失败时降级返回原始列名列表，不中断导入流程。
+     *
+     * <p>此方法在 {@code Schedulers.boundedElastic()} 线程上执行（由 ExcelAnalysisController 保证），
+     * 因此可安全调用 {@code Mono.block()}。
+     */
+    private List<String> translateChineseHeaders(List<String> rawHeaders) {
+        if (rawHeaders == null || rawHeaders.isEmpty()) return rawHeaders;
+        boolean hasCjk = rawHeaders.stream().anyMatch(this::hasCjkChars);
+        if (!hasCjk) return rawHeaders;
+
+        log.info("Detected CJK column names, translating via LLM: {}", rawHeaders);
+        String prompt = """
+            Translate these database column names to snake_case English.
+            Input column names: %s
+            Rules:
+            1. Output ONLY a JSON array with the same number of elements in the same order
+            2. Each element must be a valid snake_case identifier (lowercase, underscores, no spaces)
+            3. Preserve the semantic meaning
+            Example: ["销售额", "地区", "日期"] → ["sales_amount", "region", "date"]
+            Respond ONLY with the JSON array, no other text.
+            """.formatted(rawHeaders);
+
+        ConversationContext ctx = ConversationContext.builder()
+            .conversationId("col-translate-" + UUID.randomUUID())
+            .userId(DataAgentConstants.SYSTEM_USER_ID)
+            .permissionLevel(PermissionLevel.READ_ONLY)
+            .messages(List.of(
+                Message.builder().type(MessageType.USER).content(prompt).build()
+            ))
+            .build();
+
+        try {
+            String response = llmClient.chat(ctx).block().getContent();
+            // Extract JSON array from response
+            int start = response.indexOf('[');
+            int end = response.lastIndexOf(']');
+            if (start == -1 || end == -1) throw new IllegalArgumentException("No JSON array in response");
+            List<String> translated = objectMapper.readValue(
+                response.substring(start, end + 1),
+                new TypeReference<List<String>>() {});
+            if (translated.size() != rawHeaders.size()) {
+                throw new IllegalArgumentException("Translated count mismatch: expected "
+                    + rawHeaders.size() + " got " + translated.size());
+            }
+            log.info("Column translation: {} → {}", rawHeaders, translated);
+            return translated;
+        } catch (Exception e) {
+            log.warn("LLM column translation failed, falling back to raw headers: {}", e.getMessage());
+            return rawHeaders;
         }
     }
 
@@ -181,6 +273,6 @@ public class ExcelDataSourceConnector {
         if (name == null || name.isBlank()) return "col_" + System.nanoTime();
         String safe = UNSAFE.matcher(name.trim().replace(" ", "_")).replaceAll("_");
         safe = safe.replaceAll("_+", "_").replaceAll("^_|_$", "");
-        return safe.isBlank() ? "col" : safe.substring(0, Math.min(60, safe.length()));
+        return safe.isBlank() ? "col" : safe.substring(0, Math.min(DataAgentConstants.MAX_COLUMN_NAME_LENGTH, safe.length()));
     }
 }

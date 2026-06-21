@@ -1,5 +1,6 @@
 package com.javacodeagent.core.data;
 
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.javacodeagent.core.data.model.ChartSpec;
@@ -14,10 +15,10 @@ import com.javacodeagent.core.model.Message;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -66,8 +67,8 @@ public class DashboardGenerator {
                     .replace("{question}", question);
 
                 ConversationContext ctx = ConversationContext.builder()
-                    .conversationId("dashboard-" + UUID.randomUUID())
-                    .userId("system")
+                    .conversationId(DataAgentConstants.CONV_PREFIX_DASHBOARD + UUID.randomUUID())
+                    .userId(DataAgentConstants.SYSTEM_USER_ID)
                     .permissionLevel(PermissionLevel.READ_ONLY)
                     .messages(List.of(
                         Message.builder().type(MessageType.USER).content(prompt).build()
@@ -80,47 +81,55 @@ public class DashboardGenerator {
     }
 
     private Mono<DashboardSpec> executeDashboardSqls(String llmOutput, String question) {
-        return Mono.fromCallable(() -> {
-            List<ChartSpec> chartSpecs = new ArrayList<>();
-            try {
-                String jsonArray = extractJsonArray(llmOutput);
-                JsonNode charts = objectMapper.readTree(jsonArray);
-                for (JsonNode chart : charts) {
-                    String sql = chart.path("sql").asText();
-                    String displayType = chart.path("display_type").asText("response_table");
-                    String title = chart.path("title").asText();
-                    String thought = chart.path("thought").asText();
+        List<JsonNode> chartNodes = new ArrayList<>();
+        try {
+            String jsonArray = extractJsonArray(llmOutput);
+            JsonNode charts = objectMapper.readTree(jsonArray);
+            charts.forEach(chartNodes::add);
+        } catch (Exception e) {
+            log.error("Failed to parse dashboard LLM output: {}", llmOutput, e);
+        }
 
-                    SqlValidationResult valid = sqlValidator.validate(sql);
-                    if (!valid.isAllowed()) {
-                        chartSpecs.add(ChartSpec.builder()
-                            .sql(sql).displayType(displayType).title(title).thought(thought)
-                            .errMsg(valid.reason()).build());
-                        continue;
-                    }
-                    try {
-                        DataQueryResult result = connector.executeQuery(sql, 200, Duration.ofSeconds(30));
-                        chartSpecs.add(ChartSpec.builder()
-                            .sql(sql).displayType(displayType).title(title).thought(thought)
-                            .data(toRecords(result)).build());
-                    } catch (Exception e) {
-                        log.warn("Dashboard chart SQL failed: {} - {}", sql, e.getMessage());
-                        chartSpecs.add(ChartSpec.builder()
-                            .sql(sql).displayType(displayType).title(title).thought(thought)
-                            .errMsg(e.getMessage()).build());
-                    }
+        return Flux.fromIterable(chartNodes)
+            .flatMap(chart -> {
+                String sql = chart.path("sql").asText();
+                String displayType = chart.path("display_type").asText(DataAgentConstants.DEFAULT_DISPLAY_TYPE);
+                String title = chart.path("title").asText();
+                String thought = chart.path("thought").asText();
+
+                SqlValidationResult valid = sqlValidator.validate(sql);
+                if (!valid.isAllowed()) {
+                    return Mono.just(ChartSpec.builder()
+                        .sql(sql).displayType(displayType).title(title).thought(thought)
+                        .errMsg(valid.reason()).build());
                 }
-            } catch (Exception e) {
-                log.error("Failed to parse dashboard LLM output: {}", llmOutput, e);
-            }
-            return new DashboardSpec(question + " 综合看板", chartSpecs, "default");
-        }).subscribeOn(Schedulers.boundedElastic());
+                return Mono.fromCallable(() ->
+                    connector.executeQuery(sql, DataAgentConstants.DEFAULT_MAX_ROWS, DataAgentConstants.DEFAULT_QUERY_TIMEOUT)
+                ).subscribeOn(Schedulers.boundedElastic())
+                .map(result -> ChartSpec.builder()
+                    .sql(sql).displayType(displayType).title(title).thought(thought)
+                    .data(toRecords(result)).build())
+                .onErrorResume(e -> {
+                    log.warn("Dashboard chart SQL failed: {} - {}", sql, e.getMessage());
+                    return Mono.just(ChartSpec.builder()
+                        .sql(sql).displayType(displayType).title(title).thought(thought)
+                        .errMsg(e.getMessage()).build());
+                });
+            })
+            .collectList()
+            .map(chartSpecs -> DashboardSpec.builder()
+                .title(question + DataAgentConstants.DASHBOARD_TITLE_SUFFIX)
+                .charts(chartSpecs)
+                .build());
     }
 
     private String extractJsonArray(String text) {
         if (text == null) return "[]";
-        Pattern p = Pattern.compile("\\[.*\\]", Pattern.DOTALL);
-        Matcher m = p.matcher(text);
+        // 先去除 markdown 代码块包装（成对匹配，不误删内容中的反引号）
+        String cleaned = text.replaceAll("(?s)```(?:json)?\\n?([\\s\\S]*?)```", "$1").trim();
+        // 非贪婪匹配最外层 JSON 数组，防止 LLM 在数组外输出额外文字时截取范围过大
+        Pattern p = Pattern.compile("\\[[\\s\\S]*]");
+        Matcher m = p.matcher(cleaned);
         return m.find() ? m.group() : "[]";
     }
 

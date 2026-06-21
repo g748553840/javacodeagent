@@ -26,7 +26,7 @@ public class ChartSpec {
             .displayType(nl2sql.getDisplayType())
             .thought(nl2sql.getThought())
             .title("")
-            .data(toRecords(queryResult))
+            .data(queryResult != null ? toRecords(queryResult) : List.of())
             .build();
     }
 

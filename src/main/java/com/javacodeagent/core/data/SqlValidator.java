@@ -3,32 +3,55 @@ package com.javacodeagent.core.data;
 import com.javacodeagent.core.data.model.SqlValidationResult;
 import org.springframework.stereotype.Component;
 
-import java.util.Set;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 @Component
 public class SqlValidator {
 
-    private static final Set<String> BLOCKED_KEYWORDS = Set.of(
+    // 有序列表，保证拒绝原因中关键词名称的确定性
+    private static final List<String> BLOCKED_KEYWORDS = List.of(
         "INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
         "ALTER", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE"
     );
+
+    // 去除字符串字面量（含 '' 转义），防止 WHERE status='DELETE' 被误报
+    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'");
+
+    // 类初始化时一次性预编译所有关键字 Pattern，避免每次 validate() 调用都重复 compile
+    private static final Map<String, Pattern> KW_PATTERNS;
+    static {
+        Map<String, Pattern> m = new LinkedHashMap<>();
+        for (String kw : BLOCKED_KEYWORDS) {
+            // 词边界：关键字前后不能是字母/数字/下划线，防止误拦 deleted_at、execute_flag 等列名
+            m.put(kw, Pattern.compile("(?<![A-Z0-9_])" + kw + "(?![A-Z0-9_])"));
+        }
+        KW_PATTERNS = Collections.unmodifiableMap(m);
+    }
 
     public SqlValidationResult validate(String sql) {
         if (sql == null || sql.isBlank()) {
             return SqlValidationResult.reject("SQL is empty");
         }
         String upper = sql.trim().toUpperCase();
-        for (String kw : BLOCKED_KEYWORDS) {
-            // 判断是否以关键字开头，或关键字前有空格（防止 "SELECTINSERT" 误报）
-            if (upper.startsWith(kw + " ") || upper.startsWith(kw + "\n")
-                    || upper.startsWith(kw + "\t") || upper.equals(kw)
-                    || upper.contains(" " + kw + " ") || upper.contains("\n" + kw + " ")) {
-                return SqlValidationResult.reject("DML/DDL not allowed: " + kw);
+
+        // 前缀检查是最快的拒绝路径，先做
+        if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) {
+            return SqlValidationResult.reject(
+                "Only SELECT / WITH queries are allowed. Got: " + upper.substring(0, Math.min(30, upper.length())));
+        }
+
+        // 剔除单引号字符串字面量内容，再做关键字边界匹配
+        String stripped = STRING_LITERAL.matcher(upper).replaceAll(" ");
+        for (Map.Entry<String, Pattern> entry : KW_PATTERNS.entrySet()) {
+            if (entry.getValue().matcher(stripped).find()) {
+                return SqlValidationResult.reject("DML/DDL not allowed: " + entry.getKey());
             }
         }
-        if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) {
-            return SqlValidationResult.reject("Only SELECT / WITH queries are allowed. Got: " + upper.substring(0, Math.min(30, upper.length())));
-        }
+
         return SqlValidationResult.allow();
     }
 }

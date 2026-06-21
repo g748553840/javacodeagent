@@ -22,4 +22,12 @@ public class DataAnalysisReport {
             .errorMessage(message)
             .build();
     }
+
+    public static DataAnalysisReport error(String question, String message) {
+        return DataAnalysisReport.builder()
+            .question(question)
+            .success(false)
+            .errorMessage(message)
+            .build();
+    }
 }
