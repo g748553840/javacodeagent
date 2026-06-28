@@ -105,8 +105,10 @@ public class ExcelDataSourceConnector {
      */
     public DataQueryResult query(String sql, int maxRows) {
         try {
-            String limitedSql = sql.trim().toUpperCase().contains(" LIMIT ")
-                ? sql.trim() : sql.trim() + " LIMIT " + maxRows;
+            String trimmed = sql.trim();
+            // 使用深度感知检测，避免 "\nLIMIT"、"\tLIMIT" 被漏判，
+            // 同时防止子查询中的 LIMIT 被误判为外层 LIMIT
+            String limitedSql = hasOuterLimit(trimmed.toUpperCase()) ? trimmed : trimmed + " LIMIT " + maxRows;
             List<java.util.Map<String, Object>> rows = jdbc.queryForList(limitedSql);
             if (rows.isEmpty()) return DataQueryResult.empty(sql);
             List<String> cols = new ArrayList<>(rows.get(0).keySet());
@@ -281,5 +283,26 @@ public class ExcelDataSourceConnector {
         String safe = UNSAFE.matcher(name.trim().replace(" ", "_")).replaceAll("_");
         safe = safe.replaceAll("_+", "_").replaceAll("^_|_$", "");
         return safe.isBlank() ? "col" : safe.substring(0, Math.min(DataAgentConstants.MAX_COLUMN_NAME_LENGTH, safe.length()));
+    }
+
+    /**
+     * 仅在最外层（括号深度为 0）没有 LIMIT 子句时返回 false。
+     * 支持空格、换行、制表符等空白符前导的 LIMIT 关键字，
+     * 避免误判子查询中的 LIMIT（如 SELECT * FROM (SELECT id LIMIT 10) sub）。
+     */
+    private boolean hasOuterLimit(String upper) {
+        int depth = 0;
+        for (int i = 0; i < upper.length(); i++) {
+            char c = upper.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            } else if (depth == 0 && Character.isWhitespace(c)
+                    && upper.regionMatches(i + 1, "LIMIT ", 0, 6)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

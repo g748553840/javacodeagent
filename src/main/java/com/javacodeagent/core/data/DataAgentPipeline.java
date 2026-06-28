@@ -149,15 +149,37 @@ public class DataAgentPipeline {
             .map(qr -> ChartSpec.from(nl2SqlResult, qr));
     }
 
+    /**
+     * 将字符串值序列化为 JSON 字符串字面量（含双引号包裹）。
+     * 按 RFC 8259 转义所有必须转义的字符：
+     * - 有具名转义的控制字符（\n \r \t \b \f）
+     * - 其余 0x00–0x1F 控制字符使用 \uXXXX 格式
+     * - 反斜杠和双引号
+     */
     private String jsonStr(String value) {
         if (value == null) return "null";
-        return "\"" + value
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
-            .replace("\b", "\\b")
-            .replace("\f", "\\f") + "\"";
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"'  -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                default -> {
+                    if (c < 0x20) {
+                        // 其余控制字符（NUL、BEL、VT 等）用 \uXXXX 转义
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        sb.append('"');
+        return sb.toString();
     }
 }

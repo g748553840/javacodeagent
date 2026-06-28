@@ -52,10 +52,14 @@ public class ConversationManager {
         if (request.getConversationId() == null) {
             request.setConversationId(UUID.randomUUID().toString());
         }
-        // 加载历史消息（JPA 持久化实现跨重启连续对话）
-        List<Message> history = messagePersistence.loadHistory(request.getConversationId());
-        ConversationContext context = contextBuilder.build(request, history);
-        return processWithToolCalls(context, 0);
+        String convId = request.getConversationId();
+        // loadHistory() 是阻塞 JPA 调用，必须在 boundedElastic 线程执行
+        return Mono.fromCallable(() -> messagePersistence.loadHistory(convId))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(history -> {
+                ConversationContext context = contextBuilder.build(request, history);
+                return processWithToolCalls(context, 0);
+            });
     }
 
     /**
@@ -70,9 +74,13 @@ public class ConversationManager {
             request.setConversationId(UUID.randomUUID().toString());
         }
         String conversationId = request.getConversationId();
-        List<Message> history = messagePersistence.loadHistory(conversationId);
-        ConversationContext context = contextBuilder.build(request, history);
-        return executeStreamingLoop(context, 0, conversationId);
+        // loadHistory() 是阻塞 JPA 调用，必须在 boundedElastic 线程执行
+        return Mono.fromCallable(() -> messagePersistence.loadHistory(conversationId))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMapMany(history -> {
+                ConversationContext context = contextBuilder.build(request, history);
+                return executeStreamingLoop(context, 0, conversationId);
+            });
     }
 
     public Mono<ConversationResponse> processWithHistory(
@@ -98,6 +106,11 @@ public class ConversationManager {
 
         return compressor.compress(context)
             .flatMap(compressed -> llmClient.chat(compressed)
+                // publishOn 将 flatMap 回调切换到 boundedElastic：
+                // persistNewMessages()、saveMessages()、hookManager.triggerHook() 均为阻塞调用，
+                // 不能在 Netty IO 线程（WebClient 投递事件的线程）上执行。
+                // subscribeOn 只影响订阅线程，不影响事件投递线程，此处必须用 publishOn。
+                .publishOn(Schedulers.boundedElastic())
                 .flatMap(response -> {
                     ParsedResponse parsed = responseParser.parse(response);
 
@@ -124,7 +137,7 @@ public class ConversationManager {
                     // 持久化本轮新消息（用户消息 + 助手回复）
                     persistNewMessages(compressed);
 
-                    ConversationResponse response = ConversationResponse.builder()
+                    ConversationResponse conversationResponse = ConversationResponse.builder()
                         .content(textContent)
                         .conversationId(compressed.getConversationId())
                         .build();
@@ -137,7 +150,7 @@ public class ConversationManager {
                         .data(Map.of("content", textContent != null ? textContent : ""))
                         .build());
 
-                    return Mono.just(response);
+                    return Mono.just(conversationResponse);
                 }));
     }
 
@@ -202,7 +215,9 @@ public class ConversationManager {
         StringBuilder textAccum = new StringBuilder();
 
         return llmClient.chatStreamFull(context)
-            .subscribeOn(Schedulers.boundedElastic())
+            // publishOn 确保 concatMap 回调（含阻塞工具调用、JPA 持久化）在 boundedElastic 执行。
+            // subscribeOn 仅影响订阅线程，WebClient 仍在 Netty IO 线程投递 chunk，不能替代 publishOn。
+            .publishOn(Schedulers.boundedElastic())
             .concatMap(chunk -> switch (chunk.getType()) {
                 case TEXT -> {
                     textAccum.append(chunk.getText());

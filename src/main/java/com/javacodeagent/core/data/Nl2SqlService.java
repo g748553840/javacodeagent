@@ -16,8 +16,6 @@ import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -112,10 +110,12 @@ public class Nl2SqlService {
         String cleaned = text.replaceAll("(?s)```(?:json)?\\n?([\\s\\S]*?)```", "$1").trim();
         // 2. 如果清理后直接以 { 开头，让 Jackson 解析（支持任意嵌套深度）
         if (cleaned.startsWith("{")) return cleaned;
-        // 3. 兜底：尝试提取第一个 JSON 对象（最多支持两层嵌套）
-        Pattern p = Pattern.compile("\\{[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\}", Pattern.DOTALL);
-        Matcher m = p.matcher(cleaned);
-        if (m.find()) return m.group();
+        // 3. 兜底：从第一个 '{' 到最后一个 '}' 贪婪提取（支持任意嵌套深度）。
+        //    旧方法用正则 \\{[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\} 仅支持 2 层嵌套，
+        //    thoughts 字段含 SQL 模板 {} 或 LLM 输出含深层 JSON 时解析失败。
+        int start = cleaned.indexOf('{');
+        int end = cleaned.lastIndexOf('}');
+        if (start != -1 && end > start) return cleaned.substring(start, end + 1);
         return "{}";
     }
 }

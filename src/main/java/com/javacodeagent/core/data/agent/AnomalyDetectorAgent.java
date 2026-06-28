@@ -36,7 +36,9 @@ import java.util.regex.Pattern;/**
 @RequiredArgsConstructor
 public class AnomalyDetectorAgent implements Agent {
 
-    private static final Pattern JSON_ARRAY = Pattern.compile("\\[.*?\\]", Pattern.DOTALL);
+    // 贪婪匹配最外层 JSON 数组（从第一个 '[' 到最后一个 ']'）。
+    // 使用 [\\s\\S]* 而非 .*?（非贪婪），防止数组元素含 ']' 字符时提前截断。
+    private static final Pattern JSON_ARRAY = Pattern.compile("\\[[\\s\\S]*]");
 
     private final LLMClient llmClient;
     private final ObjectMapper objectMapper;

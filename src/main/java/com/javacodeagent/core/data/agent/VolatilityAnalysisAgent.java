@@ -19,8 +19,6 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 波动性分析 Agent — 分析数值列的均值、方差、趋势方向和极值波动。
@@ -38,7 +36,8 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class VolatilityAnalysisAgent implements Agent {
 
-    private static final Pattern JSON_OBJ = Pattern.compile("\\{.*?\\}", Pattern.DOTALL);
+    // 波动分析 Agent 不再需要 Pattern 字段：改用 indexOf/lastIndexOf 方式提取 JSON 对象，
+    // 避免非贪婪 .*? 在嵌套对象（如 "metadata":{...} 子键）处提前截断
 
     private final LLMClient llmClient;
     private final ObjectMapper objectMapper;
@@ -105,10 +104,12 @@ public class VolatilityAnalysisAgent implements Agent {
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseJsonObject(String text) {
         if (text == null) return Map.of();
-        Matcher m = JSON_OBJ.matcher(text);
-        if (m.find()) {
+        // 从第一个 '{' 到最后一个 '}' 贪婪提取，支持任意嵌套深度
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start != -1 && end > start) {
             try {
-                return objectMapper.readValue(m.group(), new TypeReference<Map<String, Object>>() {});
+                return objectMapper.readValue(text.substring(start, end + 1), new TypeReference<Map<String, Object>>() {});
             } catch (Exception e) {
                 log.debug("Could not parse volatility JSON: {}", e.getMessage());
             }

@@ -106,9 +106,11 @@ public class ExcelAnalysisController {
                 .body(DataAnalysisReport.error("question is required")));
         }
 
-        String schema = excelConnector.getTableInfo(tableName);
-
-        return nl2SqlService.generateSql(question, schema)
+        // getTableInfo() 是阻塞 JDBC 调用，必须在 boundedElastic 线程执行，
+        // 不能直接在 Netty IO 线程调用后再进入响应式链
+        return Mono.fromCallable(() -> excelConnector.getTableInfo(tableName))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(schema -> nl2SqlService.generateSql(question, schema))
             .flatMap(nl2SqlResult -> {
                 SqlValidationResult valid = sqlValidator.validate(nl2SqlResult.getSql());
                 if (!valid.isAllowed()) {
@@ -119,7 +121,6 @@ public class ExcelAnalysisController {
                 ).subscribeOn(Schedulers.boundedElastic())
                 .flatMap(qr -> {
                     ChartSpec chartSpec = ChartSpec.from(nl2SqlResult, qr);
-                    // 调用 InsightGenerator 生成真正的业务洞察（而非 thought 字段）
                     return insightGenerator.generate(question, chartSpec)
                         .map(insight -> DataAnalysisReport.builder()
                             .question(question)
