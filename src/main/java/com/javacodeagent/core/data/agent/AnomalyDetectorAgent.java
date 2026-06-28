@@ -21,9 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-/**
+import java.util.regex.Pattern;/**
  * 异常检测 Agent — 分析查询结果，识别统计异常值、缺失值和分布异常。
  *
  * <p>输入参数（via {@code AgentTask.parameters}）：
@@ -77,7 +75,7 @@ public class AnomalyDetectorAgent implements Agent {
             """.formatted(question, dataSample);
 
         ConversationContext ctx = ConversationContext.builder()
-            .conversationId(DataAgentConstants.CONV_PREFIX_NL2SQL + "anomaly-" + UUID.randomUUID())
+            .conversationId(DataAgentConstants.CONV_PREFIX_ANOMALY + UUID.randomUUID())
             .userId(DataAgentConstants.SYSTEM_USER_ID)
             .permissionLevel(PermissionLevel.READ_ONLY)
             .messages(List.of(
@@ -86,7 +84,8 @@ public class AnomalyDetectorAgent implements Agent {
             .build();
 
         try {
-            String raw = llmClient.chat(ctx).block().getContent();
+            var response = llmClient.chat(ctx).block();
+            String raw = (response != null) ? response.getContent() : null;
             List<String> anomalies = parseJsonArray(raw);
             log.debug("AnomalyDetector found {} anomalies", anomalies.size());
             return AgentResult.builder()

@@ -1,6 +1,10 @@
 spring:
   application:
     name: java-code-agent
+  # 强制使用 Reactive（Netty）服务器，防止 spring-boot-starter-data-jpa 拉入
+  # Tomcat 后 Spring Boot 误判为 Servlet 模式，导致 WebFilter / WebFlux 失效
+  main:
+    web-application-type: reactive
 
   jpa:
     hibernate:

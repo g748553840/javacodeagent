@@ -1,9 +1,9 @@
 package com.javacodeagent.core.data;
 
-import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.DataQueryResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -157,6 +157,7 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
     /**
      * 仅在最外层（括号深度为 0）没有 LIMIT 子句时才追加，
      * 避免误判子查询中的 LIMIT（如 SELECT * FROM (SELECT id LIMIT 10) sub）。
+     * 支持空格、换行、制表符等空白符前导的 LIMIT 关键字。
      */
     private String appendLimit(String sql, int maxRows) {
         String trimmed = sql.trim();
@@ -172,7 +173,9 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
                 depth++;
             } else if (c == ')') {
                 depth--;
-            } else if (depth == 0 && upper.startsWith(" LIMIT ", i)) {
+            } else if (depth == 0 && Character.isWhitespace(c)
+                    && upper.regionMatches(i + 1, "LIMIT ", 0, 6)) {
+                // Whitespace before LIMIT at the outermost level — LIMIT clause exists
                 return true;
             }
         }

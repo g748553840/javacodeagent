@@ -173,15 +173,22 @@ mvn spring-boot:run -Dspring-boot.run.profiles=dev
 ### 启动（Docker — H2 内嵌，开箱即用）
 
 ```bash
-export LLM_API_KEY=sk-ant-xxx
-docker compose up --build          # 首次构建约 2-3 分钟
+# 1. 复制环境变量模板
+cp .env.example .env
+# 2. 至少填写 LLM_API_KEY
+vim .env
+
+# 3. 启动（首次构建约 2-3 分钟）
+docker compose up --build
 ```
 
 ### 启动（Docker — PostgreSQL 生产模式）
 
 ```bash
-export LLM_API_KEY=sk-ant-xxx
-export POSTGRES_PASSWORD=changeme
+cp .env.example .env
+# 填写 LLM_API_KEY、POSTGRES_PASSWORD 等
+vim .env
+
 docker compose -f docker-compose-pg.yml up --build
 ```
 
@@ -191,6 +198,10 @@ PostgreSQL 模式下，Data Agent 的 NL2SQL 分析查询将直接指向外部 P
 
 ```yaml
 # application.yml
+spring:
+  main:
+    web-application-type: reactive  # 必须显式设置：防止 JPA 引入 Tomcat 后被误识别为 Servlet 模式
+
 llm:
   provider: anthropic           # anthropic / openai / deepseek / glm / qwen
   api-key: ${LLM_API_KEY:}      # 空值时启动报错，明确要求配置
@@ -1206,6 +1217,8 @@ ConversationRequest.userId → ContextBuilder → MemoryService / PermissionServ
 
 公开路径（无需认证）：`/api/v1/health`、`/api/v1/auth/**`、`/h2-console/**`、`/actuator/**`
 
+> **JWT + API Key 共存逻辑：** 当 JWT 认证成功后，`ApiKeyAuthFilter` 检测到 `authenticated-user-id` attribute 已存在时**直接跳过**，不会再验证 Bearer Token，避免 JWT 令牌被 API Key 过滤器误拒绝。
+
 ---
 
 ### 16. 多 Agent 协作分析架构
@@ -1261,6 +1274,8 @@ SqlCacheService.get(normalizedKey)  ← LRU 500 条 + TTL 1h
 
 Key 标准化：`trim → lowercase → 合并空白 → 移除中英文标点`，使语义相同但标点/大小写不同的问题命中同一缓存。
 
+**线程安全实现：** 使用 `ConcurrentHashMap` 作为主存储 + `LinkedHashMap`（同步块）维护 LRU 顺序，通过 `computeIfPresent` 原子操作实现 get-check-remove，消除 `Collections.synchronizedMap` 的 TOCTOU 竞争。
+
 ---
 
 ## 关键设计决策
@@ -1279,6 +1294,9 @@ Anthropic API 要求工具调用结果在同一 user 消息中批量返回，同
 
 **Anthropic vs OpenAI 流式 tool_calls 差异的处理？**  
 Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，`content_block_stop` 时立即组装完整调用。OpenAI 以 `index` 标识不同工具调用的 delta 增量，需等到 `finish_reason` 出现后才能确认所有调用均完整接收，两者实现路径不同但对外接口统一。
+
+**为何需要 `spring.main.web-application-type: reactive`？**  
+项目同时使用 `spring-boot-starter-webflux`（WebFlux / Netty）和 `spring-boot-starter-data-jpa`（JPA / Hibernate）。JPA starter 会传递引入 `spring-boot-starter-tomcat`（Servlet 容器），导致 Spring Boot 自动探测到 Servlet 栈后选择 Tomcat 启动，Netty 不会启动，所有 `WebFilter` Bean（`JwtAuthFilter`、`ApiKeyAuthFilter`）和响应式端点将全部失效。显式配置此属性可强制 Spring Boot 使用 Reactive 模式。
 
 **为何 `userId` 依赖请求头而非 Spring Security？**  
 项目使用 WebFlux，未引入 Spring Security；`X-User-Id` 请求头方案实现简单且与认证（API Key）解耦，方便未来替换为 JWT claim 提取，无需修改下游代码。
@@ -1354,7 +1372,9 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 - [x] **生产级 JWT 认证** — `JwtService`（HMAC-SHA256，sub claim 存 userId，TTL 可配）；`JwtAuthFilter`（`@Order(1)` WebFilter，认证后写 exchange attribute）；`AuthController`（`POST /api/v1/auth/token`，公开路径）；`application.yml` 新增 `security.jwt.*` 配置节；`ConversationWebSocketHandler.extractUserId()` 优先读 JWT attribute
 - [x] **多 Agent 协作分析** — `AnomalyDetectorAgent`（检测统计异常/离群值）；`VolatilityAnalysisAgent`（计算 CV / 趋势 / 极值）；`ReportGenerationAgent`（汇编 Markdown 综合报告）；`DataAnalysisAgent`（编排器，虚拟线程并行）；`MultiAnalysisReport` 模型；`POST /api/v1/data-agent/multi-analysis` 端点
 - [x] **Excel 中文列名翻译** — `ExcelDataSourceConnector` 检测 CJK 字符，调用 LLM 批量翻译为 snake_case 英文（`translateChineseHeaders()`），翻译失败自动降级；适用 .xlsx 和 .csv
-- [x] **历史 SQL 缓存** — `SqlCacheService`（LRU 500 条 + TTL 1h，`Collections.synchronizedMap(LinkedHashMap)`）；`Nl2SqlService.generateSql()` 先查缓存再调 LLM，命中时跳过 LLM 调用
+- [x] **历史 SQL 缓存** — `SqlCacheService`（LRU 500 条 + TTL 1h，`ConcurrentHashMap` + `LinkedHashMap` 双结构 LRU；`computeIfPresent` 原子 TTL 检查）；`Nl2SqlService.generateSql()` 先查缓存再调 LLM，命中时跳过 LLM 调用
+- [x] **自迭代检视修复（第六轮）** — `ApiKeyAuthFilter` 补充 `/api/v1/auth` 公开路径（修复登录端点被锁定 bug）；JWT 已认证请求跳过 ApiKey 二次校验（修复双重认证冲突）；`ExcelDataSourceConnector.getColumns()` 去掉 `.toUpperCase()`（修复 H2 引号表名大小写不匹配导致 Schema 查空）；`DataAgentConfig` 改用 `DataSourceBuilder`（修复 `DriverManagerDataSource` 无连接池的性能问题）；`importExcel/importCsv` 加 `@Transactional`（修复批量导入部分失败留脏数据）；`SqlCacheService` 改 `ConcurrentHashMap` 原子操作（修复 TOCTOU 线程安全）；`DataAnalysisAgent` `Map.of()` 改 `HashMap`（防 null 值 NPE）；`DataAgentConstants` 新增 `CONV_PREFIX_ANOMALY/VOLATILITY/REPORT`（规范 Agent 会话 ID 前缀）；三 Agent 类调用处的 LLM block 改为 null-safe；`.env.example` 新增 Docker 环境变量模板
+- [x] **自迭代检视修复（第七轮）** — `application.yml` 补充 `spring.main.web-application-type: reactive`（修复 JPA 引入 Tomcat 后 Spring Boot 误以 Servlet 模式启动，WebFilter/WebFlux 失效的根本问题）；`JdbcDataSourceConnector` 补全 `import java.time.Duration`（编译错误修复）；`ConversationController.extractUserId/resolveUserId` 优先读 JWT exchange attribute（修复 JWT 模式下 userId 仍从 X-User-Id 头取值导致身份绕过）；`ExcelDataSourceConnector.importFile()` 改为 `@Transactional` 公共方法（Spring AOP 代理只拦截 public 方法，原 private 方法上的 @Transactional 被静默忽略无法回滚）；`JwtService` 短密钥补充 WARN 日志（密钥 <32 字节时告警运维）；`DataAgentController.multiAnalysis` 增加 `result.getOutput()` 空值检查；`JdbcDataSourceConnector.hasOuterLimit()` 改用 `Character.isWhitespace` + `regionMatches`（修复换行/制表符前导 LIMIT 未被识别导致 SQL 末尾重复追加 LIMIT）；`ConversationController` 对话 CRUD 接口用 `Mono.fromCallable().subscribeOn(boundedElastic)` 封装 JPA 阻塞调用（防止在 Netty IO 线程直接执行阻塞 SQL）；`DashboardGenerator.extractJsonArray()` 修正误导性"非贪婪"注释（贪婪匹配才是正确行为：从首 `[` 到末 `]` 捕获完整外层数组）
 
 ### 待实现
 

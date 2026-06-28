@@ -9,6 +9,8 @@ import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
+import static com.javacodeagent.config.JwtAuthFilter.USER_ID_ATTR;
+
 /**
  * HTTP API Key 认证过滤器。
  *
@@ -31,13 +33,18 @@ public class ApiKeyAuthFilter implements WebFilter {
     private String configuredApiKey;
 
     private static final String[] PUBLIC_PATHS = {
-        "/api/v1/health", "/h2-console", "/actuator"
+        "/api/v1/health", "/h2-console", "/actuator", "/api/v1/auth"
     };
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         // 未配置 api-key 则跳过认证
         if (configuredApiKey == null || configuredApiKey.isBlank()) {
+            return chain.filter(exchange);
+        }
+
+        // JWT 已认证的请求跳过 API Key 检查，避免双重认证冲突
+        if (exchange.getAttribute(USER_ID_ATTR) != null) {
             return chain.filter(exchange);
         }
 

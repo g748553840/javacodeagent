@@ -13,6 +13,7 @@ import com.javacodeagent.core.skill.SkillResult;
 import com.javacodeagent.entity.Conversation;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.repository.ConversationRepository;
+import com.javacodeagent.config.JwtAuthFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -26,6 +27,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.HashSet;
 import java.util.List;
@@ -44,10 +46,13 @@ public class ConversationController {
     private final ConversationRepository conversationRepository;
 
     // -------------------------------------------------------------------------
-    // 通用辅助：从请求头提取 userId
+    // 通用辅助：从请求中提取 userId（JWT attribute 优先，兼容 X-User-Id 头）
     // -------------------------------------------------------------------------
 
     private String extractUserId(ServerWebExchange exchange) {
+        // JWT 认证成功时，JwtAuthFilter 已将 userId 写入 exchange attribute
+        String fromJwt = exchange.getAttribute(JwtAuthFilter.USER_ID_ATTR);
+        if (fromJwt != null && !fromJwt.isBlank()) return fromJwt.trim();
         String userId = exchange.getRequest().getHeaders().getFirst("X-User-Id");
         return (userId != null && !userId.isBlank()) ? userId.trim() : "default";
     }
@@ -62,25 +67,28 @@ public class ConversationController {
     // ===== 会话管理 =====
 
     @PostMapping("/conversations")
-    public ResponseEntity<Conversation> createConversation(@RequestBody Conversation conversation) {
-        Conversation saved = conversationRepository.save(conversation);
-        return ResponseEntity.ok(saved);
+    public Mono<ResponseEntity<Conversation>> createConversation(@RequestBody Conversation conversation) {
+        return Mono.fromCallable(() -> conversationRepository.save(conversation))
+            .subscribeOn(Schedulers.boundedElastic())
+            .map(ResponseEntity::ok);
     }
 
     @GetMapping("/conversations")
-    public ResponseEntity<List<Conversation>> listConversations(
+    public Mono<ResponseEntity<List<Conversation>>> listConversations(
             @RequestParam(required = false) String userId) {
-        if (userId != null) {
-            return ResponseEntity.ok(conversationRepository.findByUserIdOrderByUpdatedAtDesc(userId));
-        }
-        return ResponseEntity.ok(conversationRepository.findAll());
+        return Mono.fromCallable(() -> userId != null
+                ? conversationRepository.findByUserIdOrderByUpdatedAtDesc(userId)
+                : conversationRepository.findAll())
+            .subscribeOn(Schedulers.boundedElastic())
+            .map(ResponseEntity::ok);
     }
 
     @GetMapping("/conversations/{id}")
-    public ResponseEntity<Conversation> getConversation(@PathVariable String id) {
-        return conversationRepository.findById(id)
-            .map(ResponseEntity::ok)
-            .orElse(ResponseEntity.notFound().build());
+    public Mono<ResponseEntity<Conversation>> getConversation(@PathVariable String id) {
+        return Mono.fromCallable(() -> conversationRepository.findById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build()))
+            .subscribeOn(Schedulers.boundedElastic());
     }
 
     // ===== 任务 =====
@@ -276,12 +284,15 @@ public class ConversationController {
     }
 
     /**
-     * userId 解析策略：
-     * 1. X-User-Id 请求头（接入层认证时已确认身份，优先）
-     * 2. 路径参数（向后兼容）
-     * 3. 退化为 "default"
+     * userId 解析策略（优先级递减）：
+     * 1. JWT exchange attribute（JwtAuthFilter 设置，最可信）
+     * 2. X-User-Id 请求头（API Key 模式或非认证模式）
+     * 3. 路径参数（向后兼容）
+     * 4. 退化为 "default"
      */
     private String resolveUserId(String pathUserId, ServerWebExchange exchange) {
+        String fromJwt = exchange.getAttribute(JwtAuthFilter.USER_ID_ATTR);
+        if (fromJwt != null && !fromJwt.isBlank()) return fromJwt.trim();
         String headerUserId = exchange.getRequest().getHeaders().getFirst("X-User-Id");
         if (headerUserId != null && !headerUserId.isBlank()) return headerUserId.trim();
         if (pathUserId != null && !pathUserId.isBlank()) return pathUserId.trim();

@@ -127,7 +127,8 @@ public class DashboardGenerator {
         if (text == null) return "[]";
         // 先去除 markdown 代码块包装（成对匹配，不误删内容中的反引号）
         String cleaned = text.replaceAll("(?s)```(?:json)?\\n?([\\s\\S]*?)```", "$1").trim();
-        // 非贪婪匹配最外层 JSON 数组，防止 LLM 在数组外输出额外文字时截取范围过大
+        // 贪婪匹配最外层 JSON 数组（从第一个 '[' 到最后一个 ']'），
+        // 确保包含内部嵌套数组（如字段值为数组时不会提前截断）
         Pattern p = Pattern.compile("\\[[\\s\\S]*]");
         Matcher m = p.matcher(cleaned);
         return m.find() ? m.group() : "[]";

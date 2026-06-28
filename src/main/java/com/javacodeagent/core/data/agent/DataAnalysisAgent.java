@@ -13,9 +13,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -104,16 +104,16 @@ public class DataAnalysisAgent implements Agent {
         String anomaliesJson = anomalyResult.isSuccess() ? anomalyResult.getOutput() : "[]";
         String volatilityJson = volatilityResult.isSuccess() ? volatilityResult.getOutput() : "{}";
 
-        // Generate final report
+        // Generate final report — use HashMap to avoid Map.of() NPE on null values
+        Map<String, Object> reportParams = new HashMap<>();
+        reportParams.put("question", question);
+        reportParams.put("dataSummary", dataSummary);
+        reportParams.put("anomalies", anomaliesJson != null ? anomaliesJson : "[]");
+        reportParams.put("volatility", volatilityJson != null ? volatilityJson : "{}");
         AgentTask reportTask = AgentTask.builder()
             .type(reportGenerator.getType())
             .description("Generate report for: " + question)
-            .parameters(Map.of(
-                "question", question,
-                "dataSummary", dataSummary,
-                "anomalies", anomaliesJson,
-                "volatility", volatilityJson
-            ))
+            .parameters(reportParams)
             .build();
         AgentResult reportResult = reportGenerator.process(reportTask, context);
 

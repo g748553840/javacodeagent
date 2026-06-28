@@ -4,10 +4,10 @@ import com.javacodeagent.core.data.DataSourceConnector;
 import com.javacodeagent.core.data.JdbcDataSourceConnector;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.jdbc.DataSourceBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /**
  * 数据分析 Agent 的数据源配置。
@@ -49,14 +49,14 @@ public class DataAgentConfig {
     public DataSourceConnector dataSourceConnector(JdbcTemplate defaultJdbcTemplate) {
         if (!dataAgentDsUrl.isBlank()) {
             log.info("Data Agent using external datasource: dialect={} url={}", dialect, dataAgentDsUrl);
-            DriverManagerDataSource ds = new DriverManagerDataSource();
-            ds.setUrl(dataAgentDsUrl);
-            ds.setUsername(dataAgentDsUser);
-            ds.setPassword(dataAgentDsPass);
+            DataSourceBuilder<?> builder = DataSourceBuilder.create()
+                .url(dataAgentDsUrl)
+                .username(dataAgentDsUser)
+                .password(dataAgentDsPass);
             if (!dataAgentDsDriver.isBlank()) {
-                ds.setDriverClassName(dataAgentDsDriver);
+                builder = builder.driverClassName(dataAgentDsDriver);
             }
-            return new JdbcDataSourceConnector(new JdbcTemplate(ds), dialect, dbName);
+            return new JdbcDataSourceConnector(new JdbcTemplate(builder.build()), dialect, dbName);
         }
         log.info("Data Agent using embedded H2 datasource: dialect={} dbName={}", dialect, dbName);
         return new JdbcDataSourceConnector(defaultJdbcTemplate, dialect, dbName);

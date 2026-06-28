@@ -13,6 +13,9 @@ public final class DataAgentConstants {
     public static final String CONV_PREFIX_NL2SQL = "nl2sql-";
     public static final String CONV_PREFIX_INSIGHT = "insight-";
     public static final String CONV_PREFIX_DASHBOARD = "dashboard-";
+    public static final String CONV_PREFIX_ANOMALY = "anomaly-";
+    public static final String CONV_PREFIX_VOLATILITY = "volatility-";
+    public static final String CONV_PREFIX_REPORT = "report-";
 
     public static final String SYSTEM_USER_ID = "system";
 

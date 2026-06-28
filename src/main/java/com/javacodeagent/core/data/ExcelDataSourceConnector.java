@@ -2,7 +2,6 @@ package com.javacodeagent.core.data;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.DataQueryResult;
 import com.javacodeagent.core.enums.MessageType;
 import com.javacodeagent.core.enums.PermissionLevel;
@@ -22,6 +21,7 @@ import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -60,7 +60,12 @@ public class ExcelDataSourceConnector {
     /**
      * 将文件导入 H2 内存表，返回表名。
      * 支持 .xlsx / .csv 格式。
+     *
+     * <p>{@code @Transactional} 放在此公共入口方法上，确保 Spring AOP 代理能够拦截：
+     * Spring 事务代理只能拦截经过代理调用的 public 方法；私有方法上的 @Transactional
+     * 会被静默忽略，无法实现回滚。
      */
+    @Transactional
     public String importFile(byte[] bytes, String filename) throws IOException {
         // UUID 保证唯一性，避免高并发下 nanoTime 截断后 8 位碰撞导致数据混入同一张表
         String tableName = "tbl_" + UUID.randomUUID().toString().replace("-", "").substring(0, DataAgentConstants.TABLE_NAME_UUID_LENGTH);
@@ -220,7 +225,9 @@ public class ExcelDataSourceConnector {
             .build();
 
         try {
-            String response = llmClient.chat(ctx).block().getContent();
+            var resp = llmClient.chat(ctx).block();
+            String response = (resp != null) ? resp.getContent() : null;
+            if (response == null) throw new IllegalArgumentException("LLM returned null response");
             // Extract JSON array from response
             int start = response.indexOf('[');
             int end = response.lastIndexOf(']');
@@ -258,7 +265,7 @@ public class ExcelDataSourceConnector {
     private List<String> getColumns(String tableName) {
         return jdbc.queryForList(
             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
-            String.class, tableName.toUpperCase());
+            String.class, tableName);
     }
 
     private List<String> getSampleRows(String tableName, int n) {

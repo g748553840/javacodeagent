@@ -78,7 +78,7 @@ public class ReportGenerationAgent implements Agent {
             """.formatted(question, dataSummary, anomalies, volatility);
 
         ConversationContext ctx = ConversationContext.builder()
-            .conversationId(DataAgentConstants.CONV_PREFIX_NL2SQL + "report-" + UUID.randomUUID())
+            .conversationId(DataAgentConstants.CONV_PREFIX_REPORT + UUID.randomUUID())
             .userId(DataAgentConstants.SYSTEM_USER_ID)
             .permissionLevel(PermissionLevel.READ_ONLY)
             .messages(List.of(
@@ -87,11 +87,12 @@ public class ReportGenerationAgent implements Agent {
             .build();
 
         try {
-            String report = llmClient.chat(ctx).block().getContent();
+            var response = llmClient.chat(ctx).block();
+            String report = (response != null) ? response.getContent() : null;
             log.debug("ReportGeneration: {} chars", report != null ? report.length() : 0);
             return AgentResult.builder()
                 .success(true)
-                .output(report)
+                .output(report != null ? report : "")
                 .metadata(Map.of("reportLength", report != null ? report.length() : 0))
                 .build();
         } catch (Exception e) {

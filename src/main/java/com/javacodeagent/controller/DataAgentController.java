@@ -134,6 +134,9 @@ public class DataAgentController {
             if (!result.isSuccess()) {
                 return ResponseEntity.ok(MultiAnalysisReport.error(request.getQuestion(), result.getError()));
             }
+            if (result.getOutput() == null || result.getOutput().isBlank()) {
+                return ResponseEntity.ok(MultiAnalysisReport.error(request.getQuestion(), "Agent returned no output"));
+            }
             MultiAnalysisReport report = objectMapper.readValue(result.getOutput(), MultiAnalysisReport.class);
             return ResponseEntity.ok(report);
         })

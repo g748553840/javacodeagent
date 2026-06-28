@@ -43,7 +43,12 @@ public class JwtService {
             log.info("JWT auth disabled (security.jwt.secret not configured)");
         } else {
             byte[] raw = secret.getBytes(StandardCharsets.UTF_8);
-            // HMAC-SHA256 requires at least 256 bits (32 bytes); pad if shorter
+            // HMAC-SHA256 requires at least 256 bits (32 bytes); pad with zero bytes if shorter.
+            // Short secrets drastically weaken security — warn operator to use ≥32 chars.
+            if (raw.length < 32) {
+                log.warn("security.jwt.secret is only {} bytes (< 32). Padding with zero bytes weakens " +
+                         "the signing key. Use a secret of at least 32 characters.", raw.length);
+            }
             byte[] keyBytes = raw.length >= 32 ? raw : Arrays.copyOf(raw, 32);
             this.signingKey = Keys.hmacShaKeyFor(keyBytes);
             log.info("JWT auth enabled, token TTL = {} hours", ttlHours);

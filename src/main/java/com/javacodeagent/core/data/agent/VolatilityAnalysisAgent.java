@@ -78,7 +78,7 @@ public class VolatilityAnalysisAgent implements Agent {
             """.formatted(question, dataSample);
 
         ConversationContext ctx = ConversationContext.builder()
-            .conversationId(DataAgentConstants.CONV_PREFIX_NL2SQL + "volatility-" + UUID.randomUUID())
+            .conversationId(DataAgentConstants.CONV_PREFIX_VOLATILITY + UUID.randomUUID())
             .userId(DataAgentConstants.SYSTEM_USER_ID)
             .permissionLevel(PermissionLevel.READ_ONLY)
             .messages(List.of(
@@ -87,7 +87,8 @@ public class VolatilityAnalysisAgent implements Agent {
             .build();
 
         try {
-            String raw = llmClient.chat(ctx).block().getContent();
+            var response = llmClient.chat(ctx).block();
+            String raw = (response != null) ? response.getContent() : null;
             Map<String, Object> metrics = parseJsonObject(raw);
             log.debug("VolatilityAnalysis: trend={} cv={}", metrics.get("trend"), metrics.get("cv"));
             return AgentResult.builder()
