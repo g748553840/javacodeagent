@@ -58,42 +58,33 @@ public class DataAgentPipeline {
      * 保证背压传播正确，防止在高并发下内存积压。
      */
     public Flux<String> analyzeStream(DataQueryRequest request) {
-        String startedEvent = "{\"type\":\"started\",\"question\":" + jsonStr(request.getQuestion()) + "}";
-
-        Flux<String> pipeline = schemaRetriever.retrieve(request.getQuestion())
-            .flatMapMany(schema -> {
-                String schemaEvent = "{\"type\":\"schema_retrieved\",\"length\":" + schema.length() + "}";
-                return Flux.concat(
-                    Flux.just(schemaEvent),
+        return Flux.concat(
+            Flux.just(sse("{\"type\":\"started\",\"question\":" + jsonStr(request.getQuestion()) + "}")),
+            schemaRetriever.retrieve(request.getQuestion())
+                .flatMapMany(schema -> Flux.concat(
+                    Flux.just(sse("{\"type\":\"schema_retrieved\",\"length\":" + schema.length() + "}")),
                     nl2SqlService.generateSql(request.getQuestion(), schema)
-                        .flatMapMany(nl2SqlResult -> {
-                            String sqlEvent = "{\"type\":\"sql_generated\",\"sql\":" + jsonStr(nl2SqlResult.getSql())
-                                + ",\"displayType\":" + jsonStr(nl2SqlResult.getDisplayType()) + "}";
-                            return Flux.concat(
-                                Flux.just(sqlEvent),
-                                validateAndExecute(nl2SqlResult, request.getMaxRows())
-                                    .flatMapMany(chartSpec -> {
-                                        int rowCount = chartSpec.getData() != null ? chartSpec.getData().size() : 0;
-                                        String execEvent = "{\"type\":\"sql_executed\",\"rowCount\":" + rowCount + "}";
-                                        return Flux.concat(
-                                            Flux.just(execEvent),
-                                            insightGenerator.generate(request.getQuestion(), chartSpec)
-                                                .flatMapMany(insight -> Flux.just(
-                                                    "{\"type\":\"insight_ready\",\"markdown\":" + jsonStr(insight.markdown()) + "}",
-                                                    "{\"type\":\"done\"}"
-                                                ))
-                                        );
-                                    })
-                            );
-                        })
-                );
-            });
-
-        return Flux.concat(Flux.just(startedEvent), pipeline)
-            .onErrorResume(err -> Flux.just(
-                "{\"type\":\"error\",\"message\":" + jsonStr(err.getMessage()) + "}",
-                "{\"type\":\"done\"}"
-            ));
+                        .flatMapMany(nl2SqlResult -> Flux.concat(
+                            Flux.just(sse("{\"type\":\"sql_generated\",\"sql\":" + jsonStr(nl2SqlResult.getSql())
+                                + ",\"displayType\":" + jsonStr(nl2SqlResult.getDisplayType()) + "}")),
+                            validateAndExecute(nl2SqlResult, request.getMaxRows())
+                                .flatMapMany(chartSpec -> {
+                                    int rowCount = chartSpec.getData() != null ? chartSpec.getData().size() : 0;
+                                    return Flux.concat(
+                                        Flux.just(sse("{\"type\":\"sql_executed\",\"rowCount\":" + rowCount + "}")),
+                                        insightGenerator.generate(request.getQuestion(), chartSpec)
+                                            .flatMapMany(insight -> Flux.just(
+                                                sse("{\"type\":\"insight_ready\",\"markdown\":" + jsonStr(insight.markdown()) + "}"),
+                                                sse("{\"type\":\"done\"}")
+                                            ))
+                                    );
+                                })
+                        ))
+                ))
+        ).onErrorResume(err -> Flux.just(
+            sse("{\"type\":\"error\",\"message\":" + jsonStr(err.getMessage()) + "}"),
+            sse("{\"type\":\"done\"}")
+        ));
     }
 
     // ── 仅生成 SQL（不执行） ──────────────────────────────────────────────────
@@ -139,6 +130,11 @@ public class DataAgentPipeline {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /** 将 JSON 字符串包装为 SSE data 行（格式：{@code data: <json>\n\n}）。 */
+    private static String sse(String json) {
+        return "data: " + json + "\n\n";
+    }
 
     private Mono<ChartSpec> validateAndExecute(Nl2SqlResult nl2SqlResult, int maxRows) {
         SqlValidationResult valid = sqlValidator.validate(nl2SqlResult.getSql());

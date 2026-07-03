@@ -3,6 +3,7 @@ package com.javacodeagent.core.conversation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.javacodeagent.core.conversation.ResponseParser.ParsedResponse;
 import com.javacodeagent.core.enums.MessageType;
+import com.javacodeagent.config.AgentConfig;
 import com.javacodeagent.core.hook.HookContext;
 import com.javacodeagent.core.hook.HookManager;
 import com.javacodeagent.core.hook.HookResult;
@@ -41,8 +42,7 @@ public class ConversationManager {
     private final ObjectMapper objectMapper;
     private final MessagePersistenceService messagePersistence;
     private final HookManager hookManager;
-
-    private static final int MAX_TOOL_CALL_DEPTH = 10;
+    private final AgentConfig agentConfig;
 
     // -------------------------------------------------------------------------
     // 公开入口
@@ -97,9 +97,9 @@ public class ConversationManager {
     // -------------------------------------------------------------------------
 
     private Mono<ConversationResponse> processWithToolCalls(ConversationContext context, int depth) {
-        if (depth > MAX_TOOL_CALL_DEPTH) {
+        if (depth > agentConfig.getMaxToolCallDepth()) {
             return Mono.just(ConversationResponse.builder()
-                .content("Maximum tool call depth (" + MAX_TOOL_CALL_DEPTH + ") exceeded")
+                .content("Maximum tool call depth (" + agentConfig.getMaxToolCallDepth() + ") exceeded")
                 .conversationId(context.getConversationId())
                 .build());
         }
@@ -191,7 +191,7 @@ public class ConversationManager {
     private Flux<String> executeStreamingLoop(
             ConversationContext context, int depth, String conversationId) {
 
-        if (depth > MAX_TOOL_CALL_DEPTH) {
+        if (depth > agentConfig.getMaxToolCallDepth()) {
             return Flux.just(sseEvent("error",
                 Map.of("message", "Maximum tool call depth exceeded")));
         }

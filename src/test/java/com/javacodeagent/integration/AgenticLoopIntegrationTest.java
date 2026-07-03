@@ -40,7 +40,8 @@ import static org.mockito.Mockito.when;
 @TestPropertySource(properties = {
     "security.api-key=",
     "llm.api-key=test-key",
-    "llm.provider=anthropic"
+    "llm.provider=anthropic",
+    "agent.max-tool-call-depth=3"
 })
 class AgenticLoopIntegrationTest {
 
@@ -195,7 +196,7 @@ class AgenticLoopIntegrationTest {
     }
 
     // ------------------------------------------------------------------
-    // 场景 5：超过最大工具调用深度（10 次）应终止并返回错误消息
+    // 场景 5：超过最大工具调用深度（测试设置 3 次）应终止并返回错误消息
     // ------------------------------------------------------------------
 
     @Test

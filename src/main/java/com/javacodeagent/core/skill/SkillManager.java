@@ -6,6 +6,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +31,20 @@ public class SkillManager {
     public void registerSkill(Skill skill) {
         skills.put(skill.getName(), skill);
         log.info("Registered skill: {}", skill.getName());
+    }
+
+    public boolean unregisterSkill(String name) {
+        boolean removed = skills.remove(name) != null;
+        if (removed) log.info("Unregistered skill: {}", name);
+        return removed;
+    }
+
+    public Collection<Skill> listSkills() {
+        return Collections.unmodifiableCollection(skills.values());
+    }
+
+    public boolean containsSkill(String name) {
+        return skills.containsKey(name);
     }
 
     public SkillResult executeSkill(String skillName, SkillInput input, ExecutionContext context) {

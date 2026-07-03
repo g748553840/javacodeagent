@@ -7,9 +7,6 @@ import com.javacodeagent.core.task.TaskRecord;
 import com.javacodeagent.core.enums.TaskStatus;
 import com.javacodeagent.core.memory.MemoryEntry;
 import com.javacodeagent.core.memory.MemoryService;
-import com.javacodeagent.core.skill.SkillInput;
-import com.javacodeagent.core.skill.SkillManager;
-import com.javacodeagent.core.skill.SkillResult;
 import com.javacodeagent.entity.Conversation;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.repository.ConversationRepository;
@@ -42,7 +39,6 @@ public class ConversationController {
     private final TaskManager taskManager;
     private final PlanService planService;
     private final MemoryService memoryService;
-    private final SkillManager skillManager;
     private final ConversationRepository conversationRepository;
 
     // -------------------------------------------------------------------------
@@ -297,28 +293,5 @@ public class ConversationController {
         if (headerUserId != null && !headerUserId.isBlank()) return headerUserId.trim();
         if (pathUserId != null && !pathUserId.isBlank()) return pathUserId.trim();
         return "default";
-    }
-
-    // ===== Skill（技能） =====
-
-    /**
-     * 执行指定 Skill。
-     * Skill 是预定义的可复用能力单元，通过 {@link SkillManager} 注册后即可调用。
-     * 请求体：{@code {"name": "skill-name", "parameters": {...}}}
-     */
-    @PostMapping("/skills/{name}")
-    public ResponseEntity<SkillResult> executeSkill(
-            @PathVariable String name,
-            @RequestBody(required = false) Map<String, Object> parameters,
-            ServerWebExchange exchange) {
-        String userId = extractUserId(exchange);
-        ExecutionContext ctx = ExecutionContext.builder()
-            .userId(userId)
-            .build();
-        SkillInput input = new SkillInput(name, parameters != null ? parameters : Map.of());
-        SkillResult result = skillManager.executeSkill(name, input, ctx);
-        return result.isSuccess()
-            ? ResponseEntity.ok(result)
-            : ResponseEntity.badRequest().body(result);
     }
 }

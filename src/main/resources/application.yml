@@ -82,6 +82,9 @@ agents:
   enabled: true
   max-concurrent: 5
 
+agent:
+  max-tool-call-depth: 50
+
 skills:
   enabled: true
   location: ${user.home}/.java-code-agent/skills

@@ -27,7 +27,7 @@
 | 能力 | 说明 |
 |------|------|
 | **多模型支持** | Anthropic Claude + 所有 OpenAI 兼容接口（DeepSeek / GLM / Qwen / OpenAI） |
-| **Agentic Loop** | 自主工具调用循环，最多 10 轮，自动处理 `tool_use` / `tool_result` |
+| **Agentic Loop** | 自主工具调用循环，可配置上限（默认 50 轮），自动处理 `tool_use` / `tool_result` |
 | **流式 SSE** | 结构化 SSE 事件（tool_start / tool_result / content / done） |
 | **工具系统** | Read / Write / Edit / Glob / Grep / List / Bash / Git / SqlQuery，可插件化扩展 |
 | **权限模型** | READ_ONLY / SAFE / NORMAL / ALL 四级，工具自声明所需权限 |
@@ -76,6 +76,7 @@ javacodeagent/
 ├── src/main/java/com/javacodeagent/
 │   ├── Application.java                   # 应用入口，@EnableScheduling
 │   ├── config/
+│   │   ├── AgentConfig.java               # Agent 配置（max-tool-call-depth 可配置深度）
 │   │   ├── LLMClientConfig.java           # LLM 工厂（按 provider 选实现）
 │   │   ├── LLMConfig.java                 # LLM 配置（model / apiKey / thinking）
 │   │   ├── PermissionConfig.java          # 权限默认级别 & 自动审批
@@ -83,11 +84,13 @@ javacodeagent/
 │   │   ├── MemoryConfig.java              # 记忆存储路径
 │   │   ├── HookRegistrationConfig.java    # 内置 Hook 注册
 │   │   ├── DataAgentConfig.java           # DataSourceConnector Bean（可选外部数据源）
+│   │   ├── SkillConfig.java               # Skill 扩展配置（enabled / location 目录）
 │   │   ├── ApiKeyAuthFilter.java          # API Key 全局 WebFilter（@Order(2)）
 │   │   ├── JwtAuthFilter.java             # JWT 认证 WebFilter（@Order(1)，优先于 ApiKey）
 │   │   └── WebConfig.java                 # CORS 配置
 │   ├── controller/
-│   │   ├── ConversationController.java    # /tasks /plan /memory /skills REST
+│   │   ├── ConversationController.java    # /tasks /plan /memory REST
+│   │   ├── SkillController.java           # /skills REST（list/register/reload/unregister/execute）
 │   │   ├── ConversationWebSocketHandler.java  # /chat /chat/stream SSE 端点
 │   │   ├── DataAgentController.java       # /api/v1/data-agent/* REST + SSE + /multi-analysis
 │   │   └── ExcelAnalysisController.java   # /api/v1/data-agent/excel/* 上传 & 查询
@@ -133,7 +136,15 @@ javacodeagent/
 │   │   │       ├── DataAnalysisReport.java
 │   │   │       ├── MultiAnalysisReport.java    # 多 Agent 协作分析聚合报告
 │   │   │       └── SqlValidationResult.java
-│   │   ├── tool/ hook/ permission/ memory/ agent/ plan/ task/ skill/  # 同前
+│   │   ├── core/
+│   │   │   ├── skill/
+│   │   │   │   ├── Skill.java                 # 技能接口（getName / getParameterSchema / execute）
+│   │   │   │   ├── SkillManager.java          # 注册、查找、执行技能；list/unregister 管理方法
+│   │   │   │   ├── SkillInput.java / SkillResult.java
+│   │   │   │   ├── ExternalSkillDescriptor.java  # 外部 Skill YAML 描述符模型（name/execution/schema）
+│   │   │   │   ├── HttpDelegatedSkill.java    # HTTP 委托实现：将执行转发到外部 HTTP 端点
+│   │   │   │   └── ExternalSkillLoader.java   # 启动时扫描 skills.location 目录，支持运行时热加载
+│   │   │   ├── tool/ hook/ permission/ memory/ agent/ plan/ task/  # 同前
 │   ├── tools/                             # 内置工具实现（同前）
 │   ├── entity/                            # JPA 实体（同前）
 │   └── repository/                        # Spring Data JPA Repository
@@ -211,6 +222,9 @@ llm:
   temperature: 0.7
   system-prompt: "You are..."
   thinking-enabled: false        # true 开启 adaptive thinking（需 beta header）
+
+agent:
+  max-tool-call-depth: 50        # Agentic Loop 最大工具调用深度，超出返回错误（可配置）
 
 permissions:
   default-level: SAFE           # READ_ONLY / SAFE / NORMAL / ALL
@@ -547,11 +561,37 @@ SqlValidator 工具层（不可绕过，执行前强制拦截）
     字符串字面量豁免：WHERE status = 'DELETE' 等合法列值不会误报
 ```
 
-### 技能
+### 技能管理（Skill）
 
 ```bash
-POST /api/v1/skills/{name}   # 执行技能，请求体为参数 Map
+GET    /api/v1/skills                 # 列出所有已注册 Skill（含类型：builtin / external-http）
+POST   /api/v1/skills/register        # 动态注册外部 HTTP Skill（Body = ExternalSkillDescriptor JSON）
+POST   /api/v1/skills/reload          # 从 skills.location 目录热加载 .yml 描述符
+DELETE /api/v1/skills/{name}          # 注销指定 Skill
+POST   /api/v1/skills/{name}/execute  # 执行指定 Skill，请求体为参数 Map
 ```
+
+**外部 Skill 描述符格式**（放在 `skills.location` 目录，如 `~/.java-code-agent/skills/my-skill.yml`）：
+
+```yaml
+name: code-formatter
+description: "格式化代码并返回结果"
+parameterSchema:
+  type: object
+  properties:
+    code:
+      type: string
+  required: [code]
+execution:
+  type: http
+  url: http://localhost:9000/format
+  method: POST
+  timeoutSeconds: 30
+  headers:
+    Authorization: "Bearer your-token"
+```
+
+启动时自动加载，也可调用 `POST /api/v1/skills/reload` 运行时热加载。
 
 ---
 
@@ -657,7 +697,9 @@ public class CustomLLMClient implements LLMClient {
 |--------|------|---------|
 | 新增工具 | 实现 `Tool` + `@Component` | ToolManager `@PostConstruct` 自动注入 `List<Tool>` |
 | 新增 Agent | 实现 `Agent` + `@Component` | AgentManager 同上 |
-| 新增技能 | 实现 `Skill` + `@Component` | SkillManager 同上 |
+| 新增技能（编译期） | 实现 `Skill` + `@Component` | SkillManager 同上 |
+| 新增技能（运行时-文件） | 在 `skills.location` 目录放 `.yml` 描述符 | `ExternalSkillLoader` 扫描并注册 `HttpDelegatedSkill` |
+| 新增技能（运行时-API） | `POST /api/v1/skills/register` JSON body | `SkillController` 即时注册，立即生效 |
 | 新增 Hook | `hookManager.registerHook()` | 注入任意执行点 |
 | 替换 LLM | 实现 `LLMClient` + `@Primary` | `LLMClientConfig` 按 provider 构建 |
 | 接入 MCP | 配置 `mcp.servers` | 启动时自动发现工具并注册到 ToolManager |
@@ -730,7 +772,7 @@ LLMClient.chat() / chatStreamFull()   ← POST /v1/messages
                               tool_result 添加到消息历史
                               MessagePersistenceService 持久化
                                       │
-                                      └──→ 回到 LLMClient（递归，最多 10 次）
+                                      └──→ 回到 LLMClient（递归，最多可配置次数，默认 50 次）
 ```
 
 ---
@@ -1307,7 +1349,7 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 
 | 能力 | Claude Code | Java Code Agent |
 |------|------------|----------------|
-| Agentic Loop（最多 10 轮） | ✅ | ✅ |
+| Agentic Loop（可配置深度，默认 50 轮） | ✅ | ✅ |
 | SSE Token 级流式（Anthropic） | ✅ | ✅ |
 | SSE Token 级流式（OpenAI 兼容） | ✅ | ✅ |
 | Hook 系统 | ✅ | ✅ |
@@ -1376,6 +1418,8 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 - [x] **自迭代检视修复（第六轮）** — `ApiKeyAuthFilter` 补充 `/api/v1/auth` 公开路径（修复登录端点被锁定 bug）；JWT 已认证请求跳过 ApiKey 二次校验（修复双重认证冲突）；`ExcelDataSourceConnector.getColumns()` 去掉 `.toUpperCase()`（修复 H2 引号表名大小写不匹配导致 Schema 查空）；`DataAgentConfig` 改用 `DataSourceBuilder`（修复 `DriverManagerDataSource` 无连接池的性能问题）；`importExcel/importCsv` 加 `@Transactional`（修复批量导入部分失败留脏数据）；`SqlCacheService` 改 `ConcurrentHashMap` 原子操作（修复 TOCTOU 线程安全）；`DataAnalysisAgent` `Map.of()` 改 `HashMap`（防 null 值 NPE）；`DataAgentConstants` 新增 `CONV_PREFIX_ANOMALY/VOLATILITY/REPORT`（规范 Agent 会话 ID 前缀）；三 Agent 类调用处的 LLM block 改为 null-safe；`.env.example` 新增 Docker 环境变量模板
 - [x] **自迭代检视修复（第七轮）** — `application.yml` 补充 `spring.main.web-application-type: reactive`（修复 JPA 引入 Tomcat 后 Spring Boot 误以 Servlet 模式启动，WebFilter/WebFlux 失效的根本问题）；`JdbcDataSourceConnector` 补全 `import java.time.Duration`（编译错误修复）；`ConversationController.extractUserId/resolveUserId` 优先读 JWT exchange attribute（修复 JWT 模式下 userId 仍从 X-User-Id 头取值导致身份绕过）；`ExcelDataSourceConnector.importFile()` 改为 `@Transactional` 公共方法（Spring AOP 代理只拦截 public 方法，原 private 方法上的 @Transactional 被静默忽略无法回滚）；`JwtService` 短密钥补充 WARN 日志（密钥 <32 字节时告警运维）；`DataAgentController.multiAnalysis` 增加 `result.getOutput()` 空值检查；`JdbcDataSourceConnector.hasOuterLimit()` 改用 `Character.isWhitespace` + `regionMatches`（修复换行/制表符前导 LIMIT 未被识别导致 SQL 末尾重复追加 LIMIT）；`ConversationController` 对话 CRUD 接口用 `Mono.fromCallable().subscribeOn(boundedElastic)` 封装 JPA 阻塞调用（防止在 Netty IO 线程直接执行阻塞 SQL）；`DashboardGenerator.extractJsonArray()` 修正误导性"非贪婪"注释（贪婪匹配才是正确行为：从首 `[` 到末 `]` 捕获完整外层数组）
 - [x] **自迭代检视修复（第八轮）** — `ConversationManager.processWithToolCalls()` 编译错误：lambda 参数 `response`（`LLMResponse`）与函数体内局部变量 `ConversationResponse response` 同名，Java 禁止 lambda 体内重新声明与参数同名的变量；重命名局部变量为 `conversationResponse` 修复；`ConversationManager.processMessage()` 同步调用 `messagePersistence.loadHistory()` 阻塞 Netty IO 线程，改为 `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic()).flatMap(...)`；`ConversationManager.processMessageStream()` 同样修复，改为 `.subscribeOn(boundedElastic()).flatMapMany(...)`；`ConversationManager.processWithToolCalls()` 在 `llmClient.chat()` 后增加 `.publishOn(Schedulers.boundedElastic())`（WebClient 在 Netty IO 线程回调，`flatMap` 中的 `persistNewMessages()`/`hookManager.triggerHook()`/`handleToolCalls()` 等阻塞操作必须在弹性池执行）；`ConversationManager.processStreamChunks()` 将 `subscribeOn` 改为 `publishOn`（`subscribeOn` 仅影响冷源订阅线程，不改变 WebClient 推送 chunk 的执行线程；`concatMap` 中阻塞工具调用仍在 Netty IO 线程）；`ExcelAnalysisController.queryExcel()` 将同步 JDBC 调用 `excelConnector.getTableInfo(tableName)` 改为 `Mono.fromCallable(...).subscribeOn(boundedElastic()).flatMap(...)`；`ExcelDataSourceConnector.query()` LIMIT 检测改用深度感知 `hasOuterLimit()` 方法（原 `contains(" LIMIT ")` 漏判 `\nLIMIT`/`\tLIMIT` 等空白前导形式）；`AnomalyDetectorAgent.JSON_ARRAY` Pattern 由非贪婪 `\\[.*?\\]`（DOTALL）改为贪婪 `\\[[\\s\\S]*]`（修复数组元素字符串含 `]` 字符时提前截断的 bug）；`DataAgentPipeline.jsonStr()` 补全 RFC 8259 要求的 0x00–0x1F 控制字符全量转义（NUL/BEL/VT 等用 `\\uXXXX`；缺失转义会导致 SSE 客户端 JSON 解析失败）；`Nl2SqlService.extractJson()` 兜底改为 `indexOf('{')`/`lastIndexOf('}')` 贪婪提取（原回退正则最多支持 2 层嵌套，`thoughts` 字段含 SQL 模板 `{}` 或 LLM 输出含深层对象时解析失败）；`VolatilityAnalysisAgent` 删除 `JSON_OBJ` Pattern 字段，`parseJsonObject()` 改用 `indexOf('{')`/`lastIndexOf('}')` 贪婪提取（原非贪婪 `\\{.*?\\}` 含 `metadata` 子键等嵌套对象时提前截断）；同步清理已无用的 `import java.util.regex.Matcher` 和 `import java.util.regex.Pattern`
+
+- [x] **自迭代 Bug 修复（第九轮）** — `AgentConfig` 新增 `max-tool-call-depth`，`ConversationManager` 由硬编码 `10` 改为读 `AgentConfig.getMaxToolCallDepth()`（默认 50，`application.yml` 可覆盖）；`SkillConfig` 绑定 `skills.*` 配置；`ExternalSkillDescriptor`（YAML 描述符模型）+ `HttpDelegatedSkill`（HTTP 委托）+ `ExternalSkillLoader`（目录扫描，`@PostConstruct` + 热加载 `reload()`）+ `SkillController`（`/api/v1/skills` GET/POST/DELETE/execute 管理 API）——完整实现 Skill 三种扩展方式（@Component / YAML文件 / REST API）；`ConversationController` 移除 Skill 职责（迁到 SkillController），保持单一职责；`AgenticLoopIntegrationTest` 添加 `agent.max-tool-call-depth=3` 测试属性（防止默认 50 导致测试慢 5× 以上）；`SkillManager` 增加 `unregisterSkill/listSkills/containsSkill` 管理方法；`jackson-dataformat-yaml` 加入 pom.xml（外部 Skill YAML 解析依赖）；`DataAgentPipeline.analyzeStream()` 事件补充 `data: ...\n\n` SSE 前缀（修复 `/query/stream` 输出裸 JSON 的 SSE 格式不合规 bug）；`SkillManager` 消除方法体内 `java.util.Collection/Collections` 内联全限定名（改为正式 import）
 
 ### 待实现
 
