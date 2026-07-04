@@ -151,7 +151,7 @@ public class PlanService {
             return PlanResult.error("Plan not found: " + planId);
         }
 
-        plan.setStatus(Plan.PlanStatus.DRAFT);
+        plan.setStatus(Plan.PlanStatus.REJECTED);
         plan.setMode(Plan.PlanMode.DRAFT);
         plan.getSteps().forEach(step -> {
             if (step.getStatus() != PlanStep.StepStatus.COMPLETED) {
@@ -291,8 +291,8 @@ public class PlanService {
             return PlanResult.error("Plan not found: " + planId);
         }
 
-        if (plan.getStatus() == Plan.PlanStatus.DRAFT || plan.getStatus() == Plan.PlanStatus.IN_REVIEW) {
-            return PlanResult.error("Plan must be approved before execution");
+        if (plan.getStatus() != Plan.PlanStatus.APPROVED && plan.getStatus() != Plan.PlanStatus.IN_PROGRESS) {
+            return PlanResult.error("Plan must be in APPROVED or IN_PROGRESS status to execute. Current: " + plan.getStatus());
         }
 
         if (plan.getSteps() == null || plan.getSteps().isEmpty()) {

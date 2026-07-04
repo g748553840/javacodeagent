@@ -38,7 +38,10 @@ public class ContextCompressor {
         }
 
         List<Message> messages = context.getMessages();
-        int keepRecent = compressionConfig.getKeepRecent();
+        int keepRecent = Math.min(compressionConfig.getKeepRecent(), messages.size() - 1);
+        if (keepRecent < 0) {
+            return Mono.just(context);
+        }
         List<Message> toCompress = new ArrayList<>(
             messages.subList(0, messages.size() - keepRecent));
         List<Message> toKeep = new ArrayList<>(
@@ -77,7 +80,9 @@ public class ContextCompressor {
                     .content(summarizationPrompt)
                     .build()
             ))
+            .availableTools(List.of())
             .workingDirectory(originalContext.getWorkingDirectory())
+            .permissionLevel(originalContext.getPermissionLevel())
             .build();
 
         return llmClient.chat(summarizationContext)

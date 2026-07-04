@@ -98,7 +98,8 @@ public class AnthropicLLMClient implements LLMClient {
             body.put("system", config.getSystemPrompt());
         }
         if (config.isThinkingEnabled()) {
-            body.put("thinking", Map.of("type", "adaptive"));
+            int budget = config.getThinkingBudgetTokens() > 0 ? config.getThinkingBudgetTokens() : 8000;
+            body.put("thinking", Map.of("type", "enabled", "budget_tokens", budget));
         }
         if (context.getAvailableTools() != null && !context.getAvailableTools().isEmpty()) {
             body.put("tools", convertTools(context.getAvailableTools()));

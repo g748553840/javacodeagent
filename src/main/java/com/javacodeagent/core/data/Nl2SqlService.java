@@ -84,6 +84,8 @@ public class Nl2SqlService {
             .build();
 
         return llmClient.chat(ctx)
+            .filter(response -> response != null && response.getContent() != null && !response.getContent().isBlank())
+            .switchIfEmpty(reactor.core.publisher.Mono.error(new IllegalStateException("LLM returned empty response for NL2SQL")))
             .map(response -> parseNl2SqlResult(response.getContent()))
             .doOnSuccess(r -> log.debug("NL2SQL generated: displayType={} sql={}", r.getDisplayType(), r.getSql()))
             .doOnError(e -> log.error("NL2SQL failed for question: {}", question, e));

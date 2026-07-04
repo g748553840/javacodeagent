@@ -35,6 +35,9 @@ public class DataAgentPipeline {
     // ── 完整分析（Schema → SQL → 执行 → 洞察） ──────────────────────────────
 
     public Mono<DataAnalysisReport> analyze(DataQueryRequest request) {
+        if (request == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
+            return Mono.error(new IllegalArgumentException("Question must not be blank"));
+        }
         return schemaRetriever.retrieve(request.getQuestion())
             .flatMap(schema -> nl2SqlService.generateSql(request.getQuestion(), schema))
             .flatMap(nl2SqlResult -> validateAndExecute(nl2SqlResult, request.getMaxRows()))
@@ -46,7 +49,8 @@ public class DataAgentPipeline {
                 .success(true)
                 .build())
             .doOnError(e -> log.error("Data analysis failed: {}", e.getMessage()))
-            .onErrorResume(e -> Mono.just(DataAnalysisReport.error(e.getMessage())));
+            .onErrorResume(e -> Mono.just(DataAnalysisReport.error(
+                e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
     }
 
     // ── 流式分析（SSE 进度事件） ─────────────────────────────────────────────

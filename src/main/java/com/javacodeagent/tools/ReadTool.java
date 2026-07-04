@@ -75,20 +75,19 @@ public class ReadTool implements Tool {
                 return ToolExecutionResult.error("Not a regular file: " + filePath);
             }
 
-            List<String> lines = Files.readAllLines(path);
-
             Integer limit = input.get("limit") != null ? ((Number) input.get("limit")).intValue() : null;
             Integer offset = input.get("offset") != null ? ((Number) input.get("offset")).intValue() : 0;
+            final int safeOffset = (offset != null && offset >= 0) ? offset : 0;
 
-            List<String> resultLines = offset >= 0 && offset < lines.size()
-                ? (limit != null && limit > 0
-                    ? lines.subList(offset, Math.min(offset + limit, lines.size()))
-                    : lines.subList(offset, lines.size()))
-                : List.of();
-
+            // 使用 Files.lines() 懒加载，只读取需要的行，避免大文件 OOM
             StringBuilder result = new StringBuilder();
-            for (int i = 0; i < resultLines.size(); i++) {
-                result.append(offset + i + 1).append("\t").append(resultLines.get(i)).append("\n");
+            try (java.util.stream.Stream<String> stream = Files.lines(path, java.nio.charset.StandardCharsets.UTF_8)) {
+                java.util.stream.Stream<String> s = stream.skip(safeOffset);
+                if (limit != null && limit > 0) {
+                    s = s.limit(limit);
+                }
+                final int[] lineNum = {safeOffset + 1};
+                s.forEach(line -> result.append(lineNum[0]++).append("\t").append(line).append("\n"));
             }
 
             return ToolExecutionResult.success(result.toString());

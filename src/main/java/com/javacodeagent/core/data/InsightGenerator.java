@@ -70,9 +70,11 @@ public class InsightGenerator {
             .build();
 
         return llmClient.chat(ctx)
+            .filter(resp -> resp != null && resp.getContent() != null && !resp.getContent().isBlank())
             .map(resp -> new InsightResult(chartSpec, resp.getContent()))
             .doOnError(e -> log.error("Insight generation failed", e))
-            .onErrorReturn(new InsightResult(chartSpec, chartSpec.getThought()));
+            .onErrorReturn(new InsightResult(chartSpec,
+                chartSpec.getThought() != null ? chartSpec.getThought() : ""));
     }
 
     private String formatDataSample(List<Map<String, Object>> rows, int limit) {

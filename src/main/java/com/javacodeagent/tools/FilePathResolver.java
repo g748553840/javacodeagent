@@ -22,6 +22,10 @@ public class FilePathResolver {
      * @throws SecurityException 如果检测到路径遍历攻击
      */
     public Path resolve(String filePath, Path workingDirectory) {
+        if (filePath == null || filePath.isBlank()) {
+            throw new IllegalArgumentException("file_path must not be blank");
+        }
+
         Path path = Paths.get(filePath).normalize();
 
         if (!path.isAbsolute()) {
@@ -30,6 +34,10 @@ public class FilePathResolver {
             } else {
                 path = Paths.get(".").toAbsolutePath().resolve(path).normalize();
             }
+        } else if (workingDirectory == null) {
+            // 未配置工作目录时拒绝绝对路径，防止越权访问任意系统文件
+            throw new SecurityException(
+                "Absolute paths are not permitted when no working directory is configured: " + filePath);
         }
 
         // 路径遍历防护

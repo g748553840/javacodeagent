@@ -21,6 +21,12 @@ public class SqlValidator {
     // 去除字符串字面量（含 '' 转义），防止 WHERE status='DELETE' 被误报
     private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'");
 
+    // 去除行注释（-- ...）
+    private static final Pattern LINE_COMMENT = Pattern.compile("--[^\r\n]*");
+
+    // 去除块注释（/* ... */），非贪婪
+    private static final Pattern BLOCK_COMMENT = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
+
     // 类初始化时一次性预编译所有关键字 Pattern，避免每次 validate() 调用都重复 compile
     private static final Map<String, Pattern> KW_PATTERNS;
     static {
@@ -44,8 +50,17 @@ public class SqlValidator {
                 "Only SELECT / WITH queries are allowed. Got: " + upper.substring(0, Math.min(30, upper.length())));
         }
 
-        // 剔除单引号字符串字面量内容，再做关键字边界匹配
-        String stripped = STRING_LITERAL.matcher(upper).replaceAll(" ");
+        // 分号检测：防止堆叠查询（PostgreSQL/H2 支持 multi-statement）
+        // 先剥离字符串字面量和注释再检测，避免合法的 ';' 字符串误报
+        String noComments = BLOCK_COMMENT.matcher(upper).replaceAll(" ");
+        noComments = LINE_COMMENT.matcher(noComments).replaceAll(" ");
+        String stripped = STRING_LITERAL.matcher(noComments).replaceAll(" ");
+
+        if (stripped.contains(";")) {
+            return SqlValidationResult.reject("Stacked queries (semicolons) are not allowed");
+        }
+
+        // 关键字边界匹配（在已剥离字符串/注释的文本上检查）
         for (Map.Entry<String, Pattern> entry : KW_PATTERNS.entrySet()) {
             if (entry.getValue().matcher(stripped).find()) {
                 return SqlValidationResult.reject("DML/DDL not allowed: " + entry.getKey());

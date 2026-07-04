@@ -56,8 +56,10 @@ public class JwtAuthFilter implements WebFilter {
         }
 
         String auth = exchange.getRequest().getHeaders().getFirst("Authorization");
+        // 没有 Bearer 头：不是 JWT 请求，放行给下一个 Filter（ApiKeyAuthFilter）处理
+        // 只有携带了 Bearer token 但 token 无效时才返回 401
         if (auth == null || !auth.startsWith("Bearer ")) {
-            return unauthorized(exchange, "Missing or malformed Authorization header");
+            return chain.filter(exchange);
         }
 
         String token = auth.substring(7).trim();

@@ -81,6 +81,9 @@ public class BashTool implements Tool {
     @Override
     public ToolExecutionResult execute(Map<String, Object> input, ExecutionContext context) {
         String command = (String) input.get("command");
+        if (command == null || command.isBlank()) {
+            return ToolExecutionResult.error("command is required");
+        }
         boolean runInBackground = input.get("run_in_background") != null
             && (Boolean) input.get("run_in_background");
 
@@ -136,7 +139,7 @@ public class BashTool implements Tool {
 
             StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
+                    new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     output.append(line).append("\n");

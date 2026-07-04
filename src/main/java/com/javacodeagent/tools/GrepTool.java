@@ -72,6 +72,9 @@ public class GrepTool implements Tool {
     @Override
     public ToolExecutionResult execute(Map<String, Object> input, ExecutionContext context) {
         String pattern = (String) input.get("pattern");
+        if (pattern == null || pattern.isBlank()) {
+            return ToolExecutionResult.error("pattern is required");
+        }
         boolean caseInsensitive = input.get("case_insensitive") != null && (Boolean) input.get("case_insensitive");
 
         try {
@@ -94,7 +97,7 @@ public class GrepTool implements Tool {
             StringBuilder result = new StringBuilder();
 
             if (Files.isDirectory(searchPath)) {
-                try (Stream<Path> fileStream = Files.walk(searchPath)) {
+                try (Stream<Path> fileStream = Files.walk(searchPath, 12)) {
                     Stream<Path> filtered = fileStream.filter(Files::isRegularFile);
 
                     String glob = (String) input.get("glob");

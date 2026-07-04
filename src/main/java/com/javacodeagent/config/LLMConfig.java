@@ -16,4 +16,6 @@ public class LLMConfig {
     private String endpoint;
     private String systemPrompt;
     private boolean thinkingEnabled;
+    /** Extended thinking token budget (only effective when thinkingEnabled=true). Default 8000. */
+    private int thinkingBudgetTokens = 8000;
 }

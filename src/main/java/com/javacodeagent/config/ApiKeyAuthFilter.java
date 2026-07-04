@@ -2,6 +2,7 @@ package com.javacodeagent.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
@@ -27,6 +28,7 @@ import static com.javacodeagent.config.JwtAuthFilter.USER_ID_ATTR;
  */
 @Slf4j
 @Component
+@Order(2)
 public class ApiKeyAuthFilter implements WebFilter {
 
     @Value("${security.api-key:}")

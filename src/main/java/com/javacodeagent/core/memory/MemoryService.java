@@ -193,9 +193,14 @@ public class MemoryService {
             Files.createDirectories(userDir);
 
             String fileName = entry.getName() != null
-                ? entry.getName() + ".md"
+                ? sanitizeFileName(entry.getName()) + ".md"
                 : entry.getId() + ".md";
             Path filePath = userDir.resolve(fileName);
+            // 二次确认：防止 sanitize 后仍有路径逃逸
+            if (!filePath.toAbsolutePath().normalize().startsWith(userDir.toAbsolutePath().normalize())) {
+                log.warn("Skipping memory write: computed path escapes user directory: {}", fileName);
+                return;
+            }
 
             StringBuilder content = new StringBuilder();
             // 前置元数据
@@ -240,7 +245,7 @@ public class MemoryService {
             String safeUserId = sanitizeDirName(
                 entry.getUserId() != null ? entry.getUserId() : "default");
             String fileName = entry.getName() != null
-                ? entry.getName() + ".md"
+                ? sanitizeFileName(entry.getName()) + ".md"
                 : entry.getId() + ".md";
 
             // 优先删除子目录下的文件
@@ -426,6 +431,14 @@ public class MemoryService {
         if (userId == null || userId.isBlank()) return "default";
         // 保留字母、数字、连字符、下划线、点；其余替换为 _
         return userId.replaceAll("[^a-zA-Z0-9\\-_.]", "_").toLowerCase();
+    }
+
+    /**
+     * 将记忆名称转义为安全的文件名（不含路径分隔符、空字节等危险字符）
+     */
+    private String sanitizeFileName(String name) {
+        if (name == null || name.isBlank()) return "unnamed";
+        return name.replaceAll("[^a-zA-Z0-9\\-_.]", "_");
     }
 
     private String capitalize(String str) {

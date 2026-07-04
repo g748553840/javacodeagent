@@ -80,7 +80,7 @@ public class GlobTool implements Tool {
 
             List<String> matchedFiles = new ArrayList<>();
 
-            try (Stream<Path> paths = Files.walk(baseDir)) {
+            try (Stream<Path> paths = Files.walk(baseDir, 12)) {
                 // PathMatcher 对绝对路径匹配行为不一致：
                 //   glob:*.java   → 只匹配不含 '/' 的单段路径，绝对路径永远不匹配
                 //   glob:**/*.java → 需要完整路径字符串与模式对齐
