@@ -53,7 +53,9 @@ public class HttpDelegatedSkill implements Skill {
     @SuppressWarnings("unchecked")
     public SkillResult execute(SkillInput input, ExecutionContext context) {
         ExternalSkillDescriptor.Execution exec = descriptor.getExecution();
-        int timeout = exec.getTimeoutSeconds() > 0 ? exec.getTimeoutSeconds() : 30;
+        int timeout = exec.getTimeoutSeconds() > 0
+            ? exec.getTimeoutSeconds()
+            : ExternalSkillDescriptor.Execution.DEFAULT_TIMEOUT_SECONDS;
 
         try {
             Map<String, Object> responseBody = webClient.method(

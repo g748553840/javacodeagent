@@ -29,6 +29,7 @@ public class AnthropicLLMClient implements LLMClient {
 
     private static final String ANTHROPIC_VERSION = "2023-06-01";
     private static final String ANTHROPIC_BETA_THINKING = "interleaved-thinking-2025-05-14";
+    private static final int SSE_DATA_PREFIX_LENGTH = 6; // "data: ".length()
 
     private final WebClient webClient;
     private final LLMConfig config;
@@ -98,7 +99,9 @@ public class AnthropicLLMClient implements LLMClient {
             body.put("system", config.getSystemPrompt());
         }
         if (config.isThinkingEnabled()) {
-            int budget = config.getThinkingBudgetTokens() > 0 ? config.getThinkingBudgetTokens() : 8000;
+            int budget = config.getThinkingBudgetTokens() > 0
+                ? config.getThinkingBudgetTokens()
+                : LLMConfig.DEFAULT_THINKING_BUDGET_TOKENS;
             body.put("thinking", Map.of("type", "enabled", "budget_tokens", budget));
         }
         if (context.getAvailableTools() != null && !context.getAvailableTools().isEmpty()) {
@@ -246,7 +249,7 @@ public class AnthropicLLMClient implements LLMClient {
     private Flux<LLMStreamChunk> parseStreamChunk(String line, Map<Integer, BlockState> blocks) {
         if (line == null || !line.startsWith("data: ")) return Flux.empty();
         try {
-            String data = line.substring(6).trim();
+            String data = line.substring(SSE_DATA_PREFIX_LENGTH).trim();
             if ("[DONE]".equals(data)) return Flux.empty();
 
             JsonNode root = objectMapper.readTree(data);
@@ -338,7 +341,7 @@ public class AnthropicLLMClient implements LLMClient {
     private String parseStreamEvent(String line) {
         if (line == null || !line.startsWith("data: ")) return "";
         try {
-            String data = line.substring(6).trim();
+            String data = line.substring(SSE_DATA_PREFIX_LENGTH).trim();
             if ("[DONE]".equals(data)) return "";
             JsonNode root = objectMapper.readTree(data);
             if ("content_block_delta".equals(root.path("type").asText())) {

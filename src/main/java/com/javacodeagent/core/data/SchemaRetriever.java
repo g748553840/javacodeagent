@@ -22,6 +22,8 @@ public class SchemaRetriever {
 
     private static final int MAX_FULL_SCHEMA_TABLES = 10;
     private static final int TOP_K_TABLES = 5;
+    /** 关键词最小有效长度（码点数），过短词汇过于泛化 */
+    private static final int KEYWORD_MIN_CODEPOINTS = 2;
 
     /**
      * 检索与问题相关的 Schema（DDL + 样例行）。
@@ -45,7 +47,7 @@ public class SchemaRetriever {
     private List<String> selectByKeyword(String question, List<String> tables) {
         String lower = question.toLowerCase();
         Set<String> keywords = new HashSet<>(Arrays.asList(lower.split("[\\s,，。？！、\\-_]+")));
-        keywords.removeIf(k -> k.codePointCount(0, k.length()) < 2);
+        keywords.removeIf(k -> k.codePointCount(0, k.length()) < KEYWORD_MIN_CODEPOINTS);
 
         return tables.stream()
             .sorted(Comparator.comparingInt((String t) -> -scoreTable(t.toLowerCase(), keywords)))

@@ -54,8 +54,11 @@ public class ConversationWebSocketHandler {
 
     /** sessionId → conversationId 映射，有界 LRU（最多保留 1000 条），防止内存无限增长 */
     private static final int MAX_SESSIONS = 1000;
+    private static final int SESSION_MAP_INITIAL_CAPACITY = 256;
+    private static final float SESSION_MAP_LOAD_FACTOR = 0.75f;
+    private static final int SSE_DATA_PREFIX_LENGTH = 6; // "data: ".length()
     private final Map<String, String> activeSessions = Collections.synchronizedMap(
-        new LinkedHashMap<>(256, 0.75f, true) {
+        new LinkedHashMap<>(SESSION_MAP_INITIAL_CAPACITY, SESSION_MAP_LOAD_FACTOR, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
                 return size() > MAX_SESSIONS;
@@ -106,7 +109,7 @@ public class ConversationWebSocketHandler {
                 if (chunk.contains("\"type\":\"done\"") && chunk.contains("\"conversationId\"")) {
                     try {
                         String json = chunk.startsWith("data: ")
-                            ? chunk.substring(6).trim()
+                            ? chunk.substring(SSE_DATA_PREFIX_LENGTH).trim()
                             : chunk.trim();
                         JsonNode node = objectMapper.readTree(json);
                         String newConvId = node.path("conversationId").asText(null);

@@ -31,13 +31,14 @@ public class SqlCacheService {
 
     static final int MAX_SIZE = 500;
     static final long TTL_MILLIS = 60 * 60 * 1000L; // 1 hour
+    private static final int CACHE_INITIAL_CAPACITY = 64;
+    private static final float CACHE_LOAD_FACTOR = 0.75f;
 
     private record CacheEntry(Nl2SqlResult result, long createdAt) {}
 
-    // ConcurrentHashMap for atomic get-check-remove (avoids TOCTOU race of Collections.synchronizedMap)
-    private final ConcurrentHashMap<String, CacheEntry> store = new ConcurrentHashMap<>(64);
+    private final ConcurrentHashMap<String, CacheEntry> store = new ConcurrentHashMap<>(CACHE_INITIAL_CAPACITY);
     // LRU order tracking — access under synchronized(lruOrder)
-    private final LinkedHashMap<String, Boolean> lruOrder = new LinkedHashMap<>(64, 0.75f, true) {
+    private final LinkedHashMap<String, Boolean> lruOrder = new LinkedHashMap<>(CACHE_INITIAL_CAPACITY, CACHE_LOAD_FACTOR, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
             if (size() > MAX_SIZE) {

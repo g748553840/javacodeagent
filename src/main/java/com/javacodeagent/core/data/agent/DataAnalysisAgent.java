@@ -6,6 +6,7 @@ import com.javacodeagent.core.agent.Agent;
 import com.javacodeagent.core.agent.AgentContext;
 import com.javacodeagent.core.agent.AgentResult;
 import com.javacodeagent.core.agent.AgentTask;
+import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.DataAnalysisReport;
 import com.javacodeagent.core.data.model.MultiAnalysisReport;
 import lombok.RequiredArgsConstructor;
@@ -149,7 +150,7 @@ public class DataAnalysisAgent implements Agent {
     private String buildDataSample(DataAnalysisReport report) {
         if (report.getChartSpec() == null || report.getChartSpec().getData() == null) return "（无数据）";
         List<Map<String, Object>> rows = report.getChartSpec().getData();
-        int limit = Math.min(50, rows.size());
+        int limit = Math.min(DataAgentConstants.DATA_SAMPLE_MAX_ROWS, rows.size());
         StringBuilder sb = new StringBuilder();
         if (!rows.isEmpty()) {
             sb.append(String.join("\t", rows.get(0).keySet())).append("\n");

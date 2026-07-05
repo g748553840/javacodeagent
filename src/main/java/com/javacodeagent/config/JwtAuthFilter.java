@@ -35,6 +35,7 @@ import reactor.core.publisher.Mono;
 public class JwtAuthFilter implements WebFilter {
 
     static final String USER_ID_ATTR = "authenticated-user-id";
+    private static final int BEARER_PREFIX_LENGTH = 7; // "Bearer ".length()
 
     private static final String[] PUBLIC_PATHS = {
         "/api/v1/health", "/h2-console", "/actuator", "/api/v1/auth"
@@ -62,7 +63,7 @@ public class JwtAuthFilter implements WebFilter {
             return chain.filter(exchange);
         }
 
-        String token = auth.substring(7).trim();
+        String token = auth.substring(BEARER_PREFIX_LENGTH).trim();
         String userId = jwtService.extractUserId(token);
         if (userId == null) {
             return unauthorized(exchange, "Invalid or expired JWT token");

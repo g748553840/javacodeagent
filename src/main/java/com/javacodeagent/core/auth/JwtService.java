@@ -32,6 +32,9 @@ import java.util.Date;
 @Service
 public class JwtService {
 
+    /** HMAC-SHA256 签名密钥最小字节数（256 bit）。 */
+    private static final int HMAC_MIN_KEY_BYTES = 32;
+
     private final SecretKey signingKey;
     private final Duration tokenTtl;
 
@@ -43,13 +46,11 @@ public class JwtService {
             log.info("JWT auth disabled (security.jwt.secret not configured)");
         } else {
             byte[] raw = secret.getBytes(StandardCharsets.UTF_8);
-            // HMAC-SHA256 requires at least 256 bits (32 bytes); pad with zero bytes if shorter.
-            // Short secrets drastically weaken security — warn operator to use ≥32 chars.
-            if (raw.length < 32) {
-                log.warn("security.jwt.secret is only {} bytes (< 32). Padding with zero bytes weakens " +
-                         "the signing key. Use a secret of at least 32 characters.", raw.length);
+            if (raw.length < HMAC_MIN_KEY_BYTES) {
+                log.warn("security.jwt.secret is only {} bytes (< {}). Padding with zero bytes weakens " +
+                         "the signing key. Use a secret of at least {} characters.", raw.length, HMAC_MIN_KEY_BYTES, HMAC_MIN_KEY_BYTES);
             }
-            byte[] keyBytes = raw.length >= 32 ? raw : Arrays.copyOf(raw, 32);
+            byte[] keyBytes = raw.length >= HMAC_MIN_KEY_BYTES ? raw : Arrays.copyOf(raw, HMAC_MIN_KEY_BYTES);
             this.signingKey = Keys.hmacShaKeyFor(keyBytes);
             log.info("JWT auth enabled, token TTL = {} hours", ttlHours);
         }

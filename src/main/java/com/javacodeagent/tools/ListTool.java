@@ -20,6 +20,10 @@ import java.util.stream.Stream;
 @RequiredArgsConstructor
 public class ListTool implements Tool {
 
+    private static final long BYTES_PER_KB = 1024L;
+    private static final long BYTES_PER_MB = 1024L * 1024;
+    private static final long BYTES_PER_GB = 1024L * 1024 * 1024;
+
     private final FilePathResolver pathResolver;
 
     @Override
@@ -115,9 +119,9 @@ public class ListTool implements Tool {
     }
 
     private String formatFileSize(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
-        return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
+        if (bytes < BYTES_PER_KB) return bytes + " B";
+        if (bytes < BYTES_PER_MB) return String.format("%.1f KB", bytes / (double) BYTES_PER_KB);
+        if (bytes < BYTES_PER_GB) return String.format("%.1f MB", bytes / (double) BYTES_PER_MB);
+        return String.format("%.1f GB", bytes / (double) BYTES_PER_GB);
     }
 }

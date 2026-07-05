@@ -14,11 +14,13 @@ public class Application {
         SpringApplication.run(Application.class, args);
     }
 
+    private static final int MAX_CODEC_BUFFER_BYTES = 10 * 1024 * 1024;
+
     @Bean
     public WebClient webClient() {
         return WebClient.builder()
             .codecs(configurer -> configurer.defaultCodecs()
-                .maxInMemorySize(10 * 1024 * 1024))  // 10 MB buffer for large SSE payloads
+                .maxInMemorySize(MAX_CODEC_BUFFER_BYTES))
             .build();
     }
 }

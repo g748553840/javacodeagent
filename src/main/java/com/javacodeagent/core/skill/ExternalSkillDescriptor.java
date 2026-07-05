@@ -41,7 +41,8 @@ public class ExternalSkillDescriptor {
         private String type = "http";
         private String url;
         private String method = "POST";
-        private int timeoutSeconds = 30;
+        private static final int DEFAULT_TIMEOUT_SECONDS = 30;
+        private int timeoutSeconds = DEFAULT_TIMEOUT_SECONDS;
         private Map<String, String> headers;
     }
 }

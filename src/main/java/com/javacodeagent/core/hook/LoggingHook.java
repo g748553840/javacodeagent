@@ -7,6 +7,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class LoggingHook implements HookHandler {
 
+    private static final int LOG_RESULT_MAX_LENGTH = 200;
+
     @Override
     public HookResult handle(HookContext context) {
         switch (context.getType()) {
@@ -24,8 +26,8 @@ public class LoggingHook implements HookHandler {
                     ? (String) context.getData().getOrDefault("result", "unknown")
                     : "unknown";
                 // 截断过长内容，防止文件内容等敏感信息写入日志
-                if (result != null && result.length() > 200) {
-                    result = result.substring(0, 200) + "...[truncated]";
+                if (result != null && result.length() > LOG_RESULT_MAX_LENGTH) {
+                    result = result.substring(0, LOG_RESULT_MAX_LENGTH) + "...[truncated]";
                 }
                 log.info("[Hook] Post-tool call: {} result: {}", toolName, result);
             }

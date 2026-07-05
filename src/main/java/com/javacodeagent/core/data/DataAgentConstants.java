@@ -26,5 +26,20 @@ public final class DataAgentConstants {
     public static final int TABLE_NAME_UUID_LENGTH = 12;
     public static final int MAX_COLUMN_NAME_LENGTH = 60;
 
+    /** DDL 中用于存储导入列值的 VARCHAR 最大长度。 */
+    public static final int IMPORT_VARCHAR_LENGTH = 1000;
+
+    /** 检测 LIMIT 子句时 "LIMIT " 字符串的长度。 */
+    public static final int LIMIT_KEYWORD_LENGTH = 6; // "LIMIT ".length()
+
+    /** 图表并发 SQL 执行数上限（与 LLM prompt 约定的 2-4 张一致）。 */
+    public static final int DASHBOARD_CHART_CONCURRENCY = 4;
+
+    /** 数据分析时 prompt 中的最大样本行数。 */
+    public static final int DATA_SAMPLE_MAX_ROWS = 50;
+
+    /** SQL 校验错误提示中显示的最大 SQL 前缀长度。 */
+    public static final int SQL_ERROR_EXCERPT_LENGTH = 30;
+
     private DataAgentConstants() {}
 }

@@ -22,6 +22,8 @@ import java.util.stream.Stream;
 @RequiredArgsConstructor
 public class GrepTool implements Tool {
 
+    private static final int MAX_WALK_DEPTH = 12;
+
     private final FilePathResolver pathResolver;
 
     @Override
@@ -97,7 +99,7 @@ public class GrepTool implements Tool {
             StringBuilder result = new StringBuilder();
 
             if (Files.isDirectory(searchPath)) {
-                try (Stream<Path> fileStream = Files.walk(searchPath, 12)) {
+                try (Stream<Path> fileStream = Files.walk(searchPath, MAX_WALK_DEPTH)) {
                     Stream<Path> filtered = fileStream.filter(Files::isRegularFile);
 
                     String glob = (String) input.get("glob");

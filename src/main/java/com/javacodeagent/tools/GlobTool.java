@@ -23,6 +23,8 @@ import java.util.stream.Stream;
 @RequiredArgsConstructor
 public class GlobTool implements Tool {
 
+    private static final int MAX_WALK_DEPTH = 12;
+
     private final FilePathResolver pathResolver;
 
     @Override
@@ -80,7 +82,7 @@ public class GlobTool implements Tool {
 
             List<String> matchedFiles = new ArrayList<>();
 
-            try (Stream<Path> paths = Files.walk(baseDir, 12)) {
+            try (Stream<Path> paths = Files.walk(baseDir, MAX_WALK_DEPTH)) {
                 // PathMatcher 对绝对路径匹配行为不一致：
                 //   glob:*.java   → 只匹配不含 '/' 的单段路径，绝对路径永远不匹配
                 //   glob:**/*.java → 需要完整路径字符串与模式对齐

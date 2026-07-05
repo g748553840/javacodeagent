@@ -12,6 +12,9 @@ import java.util.regex.Pattern;
 @Component
 public class SqlValidator {
 
+    /** SQL 校验错误提示中截取的最大前缀长度。 */
+    private static final int ERROR_EXCERPT_LENGTH = DataAgentConstants.SQL_ERROR_EXCERPT_LENGTH;
+
     // 有序列表，保证拒绝原因中关键词名称的确定性
     private static final List<String> BLOCKED_KEYWORDS = List.of(
         "INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
@@ -47,7 +50,7 @@ public class SqlValidator {
         // 前缀检查是最快的拒绝路径，先做
         if (!upper.startsWith("SELECT") && !upper.startsWith("WITH")) {
             return SqlValidationResult.reject(
-                "Only SELECT / WITH queries are allowed. Got: " + upper.substring(0, Math.min(30, upper.length())));
+                "Only SELECT / WITH queries are allowed. Got: " + upper.substring(0, Math.min(ERROR_EXCERPT_LENGTH, upper.length())));
         }
 
         // 分号检测：防止堆叠查询（PostgreSQL/H2 支持 multi-statement）

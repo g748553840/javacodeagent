@@ -23,6 +23,12 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ContextCompressor {
 
+    private static final int FORMAT_SUMMARY_MAX_CONTENT_LENGTH = 500;
+    private static final int FALLBACK_SUMMARY_CHAR_BUDGET = 1500;
+    private static final int TRUNCATE_USER_MSG = 200;
+    private static final int TRUNCATE_ASSISTANT_MSG = 150;
+    private static final int TRUNCATE_TOOL_RESULT_MSG = 100;
+
     private final LLMClient llmClient;
     private final ContextCompressionConfig compressionConfig;
 
@@ -98,8 +104,8 @@ public class ContextCompressor {
                 continue;
             }
             String role = msg.getType().name();
-            String content = msg.getContent().length() > 500
-                ? msg.getContent().substring(0, 500) + "...[truncated]"
+            String content = msg.getContent().length() > FORMAT_SUMMARY_MAX_CONTENT_LENGTH
+                ? msg.getContent().substring(0, FORMAT_SUMMARY_MAX_CONTENT_LENGTH) + "...[truncated]"
                 : msg.getContent();
 
             if (msg.getType() == MessageType.TOOL_RESULT) {
@@ -112,7 +118,7 @@ public class ContextCompressor {
 
     private String buildFallbackSummary(List<Message> messages) {
         StringBuilder summary = new StringBuilder("Earlier conversation: ");
-        int charBudget = 1500;
+        int charBudget = FALLBACK_SUMMARY_CHAR_BUDGET;
 
         for (Message msg : messages) {
             if (msg.getContent() == null || msg.getContent().isEmpty()) continue;
@@ -120,11 +126,11 @@ public class ContextCompressor {
 
             String entry;
             if (msg.getType() == MessageType.USER) {
-                entry = "[User] " + truncate(msg.getContent(), 200);
+                entry = "[User] " + truncate(msg.getContent(), TRUNCATE_USER_MSG);
             } else if (msg.getType() == MessageType.ASSISTANT) {
-                entry = "[Assistant] " + truncate(msg.getContent(), 150);
+                entry = "[Assistant] " + truncate(msg.getContent(), TRUNCATE_ASSISTANT_MSG);
             } else if (msg.getType() == MessageType.TOOL_RESULT) {
-                entry = "[ToolResult] " + truncate(msg.getContent(), 100);
+                entry = "[ToolResult] " + truncate(msg.getContent(), TRUNCATE_TOOL_RESULT_MSG);
             } else {
                 continue;
             }

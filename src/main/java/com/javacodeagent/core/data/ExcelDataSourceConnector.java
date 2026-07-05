@@ -253,7 +253,7 @@ public class ExcelDataSourceConnector {
 
     private void createTable(String tableName, List<String> colNames) {
         String cols = colNames.stream()
-            .map(c -> "\"" + c + "\" VARCHAR(1000)")
+            .map(c -> "\"" + c + "\" VARCHAR(" + DataAgentConstants.IMPORT_VARCHAR_LENGTH + ")")
             .collect(Collectors.joining(", "));
         jdbc.execute("CREATE TABLE IF NOT EXISTS \"" + tableName + "\" (" + cols + ")");
     }
@@ -299,7 +299,7 @@ public class ExcelDataSourceConnector {
             } else if (c == ')') {
                 depth--;
             } else if (depth == 0 && Character.isWhitespace(c)
-                    && upper.regionMatches(i + 1, "LIMIT ", 0, 6)) {
+                    && upper.regionMatches(i + 1, "LIMIT ", 0, DataAgentConstants.LIMIT_KEYWORD_LENGTH)) {
                 return true;
             }
         }

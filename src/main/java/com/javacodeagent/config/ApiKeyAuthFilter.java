@@ -31,6 +31,8 @@ import static com.javacodeagent.config.JwtAuthFilter.USER_ID_ATTR;
 @Order(2)
 public class ApiKeyAuthFilter implements WebFilter {
 
+    private static final int BEARER_PREFIX_LENGTH = 7; // "Bearer ".length()
+
     @Value("${security.api-key:}")
     private String configuredApiKey;
 
@@ -62,7 +64,7 @@ public class ApiKeyAuthFilter implements WebFilter {
 
         boolean valid = false;
         if (auth != null && auth.startsWith("Bearer ")) {
-            valid = configuredApiKey.equals(auth.substring(7).trim());
+            valid = configuredApiKey.equals(auth.substring(BEARER_PREFIX_LENGTH).trim());
         } else if (xApiKey != null) {
             valid = configuredApiKey.equals(xApiKey.trim());
         }

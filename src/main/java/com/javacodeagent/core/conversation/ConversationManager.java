@@ -34,6 +34,11 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ConversationManager {
 
+    /** 持久化时每轮保存的消息数量（用户消息 + 助手回复）。 */
+    private static final int MESSAGES_PER_ROUND = 2;
+    /** 工具调用结果的日志预览最大长度。 */
+    private static final int PREVIEW_MAX_LENGTH = 200;
+
     private final LLMClient llmClient;
     private final ToolManager toolManager;
     private final ContextBuilder contextBuilder;
@@ -314,9 +319,9 @@ public class ConversationManager {
     private void persistNewMessages(ConversationContext context) {
         // 只持久化最后一条用户消息 + 助手回复（已在 context.messages 末尾）
         List<Message> msgs = context.getMessages();
-        if (msgs.size() >= 2) {
+        if (msgs.size() >= MESSAGES_PER_ROUND) {
             messagePersistence.saveMessages(context.getConversationId(),
-                msgs.subList(msgs.size() - 2, msgs.size()));
+                msgs.subList(msgs.size() - MESSAGES_PER_ROUND, msgs.size()));
         } else if (!msgs.isEmpty()) {
             messagePersistence.saveMessages(context.getConversationId(), msgs);
         }
@@ -335,8 +340,8 @@ public class ConversationManager {
 
     private String preview(ToolExecutionResult result) {
         if (!result.isSuccess() || result.getContent() == null) return "";
-        return result.getContent().length() > 200
-            ? result.getContent().substring(0, 200) + "..."
+        return result.getContent().length() > PREVIEW_MAX_LENGTH
+            ? result.getContent().substring(0, PREVIEW_MAX_LENGTH) + "..."
             : result.getContent();
     }
 

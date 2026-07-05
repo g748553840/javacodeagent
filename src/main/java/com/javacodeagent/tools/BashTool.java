@@ -20,6 +20,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class BashTool implements Tool {
 
+    private static final int DEFAULT_TIMEOUT_MS = 120_000;
+
     private final BackgroundTaskExecutor backgroundTaskExecutor;
     private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
 
@@ -117,7 +119,7 @@ public class BashTool implements Tool {
     private ToolExecutionResult executeSync(String command, Map<String, Object> input, ExecutionContext context) {
         int timeout = input.get("timeout") != null
             ? ((Number) input.get("timeout")).intValue()
-            : 120000;
+            : DEFAULT_TIMEOUT_MS;
 
         try {
             ProcessBuilder processBuilder = new ProcessBuilder();

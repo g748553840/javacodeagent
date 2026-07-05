@@ -115,7 +115,7 @@ public class DashboardGenerator {
                         .sql(sql).displayType(displayType).title(title).thought(thought)
                         .errMsg(e.getMessage()).build());
                 });
-            }, 4)  // 最多并行执行 4 张图表 SQL，与 LLM prompt 约定的 2-4 张一致
+            }, DataAgentConstants.DASHBOARD_CHART_CONCURRENCY)  // 最多并行执行图表 SQL，与 LLM prompt 约定的 2-4 张一致
             .collectList()
             .map(chartSpecs -> DashboardSpec.builder()
                 .title(question + DataAgentConstants.DASHBOARD_TITLE_SUFFIX)

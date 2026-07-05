@@ -39,6 +39,15 @@ import java.util.stream.Stream;
 @RequiredArgsConstructor
 public class MemoryService {
 
+    private static final int MEMORY_INDEX_MAX_LINE_LENGTH = 150;
+    private static final int MEMORY_INDEX_TRUNCATE_LENGTH = 147; // MAX_LINE_LENGTH - 3 for "..."
+    private static final int FRONTMATTER_PARTS = 3;
+    // frontmatter field prefix lengths
+    private static final int PREFIX_NAME = 5;        // "name:".length()
+    private static final int PREFIX_DESCRIPTION = 12; // "description:".length()
+    private static final int PREFIX_USER_ID = 7;      // "userId:".length()
+    private static final int PREFIX_TYPE = 5;         // "type:".length()
+
     private final MemoryConfig memoryConfig;
 
     /**
@@ -297,8 +306,8 @@ public class MemoryService {
                     capitalize(title), fileName, entry.getDescription());
 
                 // 截断到150字符
-                if (line.length() > 150) {
-                    line = line.substring(0, 147) + "...";
+                if (line.length() > MEMORY_INDEX_MAX_LINE_LENGTH) {
+                    line = line.substring(0, MEMORY_INDEX_TRUNCATE_LENGTH) + "...";
                 }
 
                 index.append(line).append("\n");
@@ -366,23 +375,23 @@ public class MemoryService {
             List<String> links = new ArrayList<>();
             StringBuilder body = new StringBuilder();
 
-            String[] parts = content.split(FRONTMATTER_DELIMITER, 3);
-            if (parts.length >= 3) {
+            String[] parts = content.split(FRONTMATTER_DELIMITER, FRONTMATTER_PARTS);
+            if (parts.length >= FRONTMATTER_PARTS) {
                 // 解析 YAML 格式的前置元数据
                 String yaml = parts[1];
                 for (String line : yaml.split("\n")) {
                     line = line.trim();
                     if (line.startsWith("name:")) {
-                        name = line.substring(5).trim();
+                        name = line.substring(PREFIX_NAME).trim();
                     } else if (line.startsWith("description:")) {
-                        description = line.substring(12).trim();
+                        description = line.substring(PREFIX_DESCRIPTION).trim();
                     } else if (line.startsWith("userId:")) {
                         // frontmatter 中明确记录的 userId 优先于目录名
-                        String fmUserId = line.substring(7).trim();
+                        String fmUserId = line.substring(PREFIX_USER_ID).trim();
                         if (!fmUserId.isEmpty()) userId = fmUserId;
                     } else if (line.startsWith("type:")) {
                         try {
-                            type = MemoryType.valueOf(line.substring(5).trim().toUpperCase());
+                            type = MemoryType.valueOf(line.substring(PREFIX_TYPE).trim().toUpperCase());
                         } catch (IllegalArgumentException e) {
                             type = MemoryType.USER;
                         }

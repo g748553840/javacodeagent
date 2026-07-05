@@ -24,7 +24,6 @@ import java.util.Map;
 public class HttpMcpClient implements McpClient {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
-
     private final String name;
     private final String serverUrl;
     private final WebClient webClient;

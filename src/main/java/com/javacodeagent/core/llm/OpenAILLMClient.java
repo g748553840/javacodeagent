@@ -28,6 +28,8 @@ import java.util.Map;
 @Slf4j
 public class OpenAILLMClient implements LLMClient {
 
+    private static final int SSE_DATA_PREFIX_LENGTH = 6; // "data: ".length()
+
     private final WebClient webClient;
     private final LLMConfig config;
     private final ObjectMapper objectMapper;
@@ -281,7 +283,7 @@ public class OpenAILLMClient implements LLMClient {
     private Flux<LLMStreamChunk> parseOpenAiChunk(String line, Map<Integer, ToolCallAccum> accumMap) {
         if (line == null || !line.startsWith("data: ")) return Flux.empty();
         try {
-            String data = line.substring(6).trim();
+            String data = line.substring(SSE_DATA_PREFIX_LENGTH).trim();
             if ("[DONE]".equals(data)) return Flux.empty();
 
             JsonNode root = objectMapper.readTree(data);
@@ -381,7 +383,7 @@ public class OpenAILLMClient implements LLMClient {
     private String parseStreamEvent(String line) {
         if (line == null || !line.startsWith("data: ")) return "";
         try {
-            String data = line.substring(6).trim();
+            String data = line.substring(SSE_DATA_PREFIX_LENGTH).trim();
             if ("[DONE]".equals(data)) return "";
             JsonNode root = objectMapper.readTree(data);
             JsonNode delta = root.path("choices").path(0).path("delta");

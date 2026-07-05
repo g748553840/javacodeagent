@@ -174,7 +174,7 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
             } else if (c == ')') {
                 depth--;
             } else if (depth == 0 && Character.isWhitespace(c)
-                    && upper.regionMatches(i + 1, "LIMIT ", 0, 6)) {
+                    && upper.regionMatches(i + 1, "LIMIT ", 0, DataAgentConstants.LIMIT_KEYWORD_LENGTH)) {
                 // Whitespace before LIMIT at the outermost level — LIMIT clause exists
                 return true;
             }
