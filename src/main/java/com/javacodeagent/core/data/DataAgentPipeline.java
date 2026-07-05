@@ -50,6 +50,7 @@ public class DataAgentPipeline {
                 .build())
             .doOnError(e -> log.error("Data analysis failed: {}", e.getMessage()))
             .onErrorResume(e -> Mono.just(DataAnalysisReport.error(
+                request.getQuestion(),
                 e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
     }
 
@@ -62,6 +63,12 @@ public class DataAgentPipeline {
      * 保证背压传播正确，防止在高并发下内存积压。
      */
     public Flux<String> analyzeStream(DataQueryRequest request) {
+        if (request == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
+            return Flux.just(
+                sse("{\"type\":\"error\",\"message\":\"question must not be blank\"}"),
+                sse("{\"type\":\"done\"}")
+            );
+        }
         return Flux.concat(
             Flux.just(sse("{\"type\":\"started\",\"question\":" + jsonStr(request.getQuestion()) + "}")),
             schemaRetriever.retrieve(request.getQuestion())

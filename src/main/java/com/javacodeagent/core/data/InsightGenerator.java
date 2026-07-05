@@ -72,6 +72,14 @@ public class InsightGenerator {
         return llmClient.chat(ctx)
             .filter(resp -> resp != null && resp.getContent() != null && !resp.getContent().isBlank())
             .map(resp -> new InsightResult(chartSpec, resp.getContent()))
+            // 若 LLM 返回空内容（filter 过滤为空 Mono），降级到 thought 字段
+            .switchIfEmpty(Mono.defer(() -> {
+                String fallback = chartSpec.getThought() != null && !chartSpec.getThought().isBlank()
+                    ? chartSpec.getThought()
+                    : (detectLanguage(question).equals("Chinese") ? "暂无洞察。" : "No insight available.");
+                log.debug("InsightGenerator: LLM returned empty content, using thought as fallback");
+                return Mono.just(new InsightResult(chartSpec, fallback));
+            }))
             .doOnError(e -> log.error("Insight generation failed", e))
             .onErrorReturn(new InsightResult(chartSpec,
                 chartSpec.getThought() != null ? chartSpec.getThought() : ""));

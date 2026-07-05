@@ -69,9 +69,8 @@ llm:
 permissions:
   default-level: SAFE
   auto-approve:
-    - file-read
-    - glob
-    - grep
+    - file-read    # FILE_READ — Read/Glob/Grep/List 工具使用此权限
+    - database-read  # DATABASE_READ — SqlQueryTool 使用此权限
 
 memory:
   enabled: true

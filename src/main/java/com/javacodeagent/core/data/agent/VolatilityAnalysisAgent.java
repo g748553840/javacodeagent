@@ -16,6 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -103,7 +104,7 @@ public class VolatilityAnalysisAgent implements Agent {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseJsonObject(String text) {
-        if (text == null) return Map.of();
+        if (text == null) return new HashMap<>();
         // 从第一个 '{' 到最后一个 '}' 贪婪提取，支持任意嵌套深度
         int start = text.indexOf('{');
         int end = text.lastIndexOf('}');
@@ -114,6 +115,8 @@ public class VolatilityAnalysisAgent implements Agent {
                 log.debug("Could not parse volatility JSON: {}", e.getMessage());
             }
         }
-        return Map.of("trend", "insufficient_data");
+        Map<String, Object> fallback = new HashMap<>();
+        fallback.put("trend", "insufficient_data");
+        return fallback;
     }
 }

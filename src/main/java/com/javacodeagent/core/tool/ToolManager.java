@@ -87,11 +87,12 @@ public class ToolManager {
         }
 
         // Pre-tool-call Hook
+        Map<String, Object> inputForHook = toolCall.getInput() != null ? toolCall.getInput() : Map.of();
         HookContext preHookContext = HookContext.builder()
             .type(HookType.PRE_TOOL_CALL)
             .userId(context.getUserId())
             .conversationId(context.getConversationId())
-            .data(Map.of("toolName", tool.getName(), "input", toolCall.getInput()))
+            .data(Map.of("toolName", tool.getName(), "input", inputForHook))
             .build();
         HookResult preHookResult = hookManager.triggerHook(HookType.PRE_TOOL_CALL, preHookContext);
         if (!preHookResult.shouldContinue()) {

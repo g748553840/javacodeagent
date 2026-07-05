@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PermissionService {
@@ -71,9 +72,12 @@ public class PermissionService {
      */
     public boolean checkPermissionLevel(PermissionLevel level, PermissionType permissionType) {
         return switch (level) {
-            case READ_ONLY -> permissionType == PermissionType.FILE_READ;
+            case READ_ONLY -> permissionType == PermissionType.FILE_READ
+                           || permissionType == PermissionType.DATABASE_READ;
             case SAFE      -> permissionType == PermissionType.FILE_READ
-                           || permissionType == PermissionType.FILE_WRITE;
+                           || permissionType == PermissionType.FILE_WRITE
+                           || permissionType == PermissionType.DATABASE_READ
+                           || permissionType == PermissionType.GIT_OPERATION;
             case NORMAL    -> permissionType != PermissionType.CONFIG_MODIFY;
             case ALL       -> true;
         };
