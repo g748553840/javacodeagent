@@ -3,6 +3,10 @@ package com.javacodeagent.core.data;
 import com.javacodeagent.core.data.model.DataQueryResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
+import java.io.Closeable;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -16,11 +20,24 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
     private final JdbcTemplate jdbc;
     private final String dialect;
     private final String dbName;
+    /** 仅当此连接器自行创建了连接池（如通过 DataSourceManager.registerJdbc 动态注册）时非空；
+     *  Spring 管理的默认数据源不设置此字段，避免 close() 时误关闭应用级共享连接池。 */
+    private final DataSource ownedDataSource;
 
     public JdbcDataSourceConnector(JdbcTemplate jdbc, String dialect, String dbName) {
+        this(jdbc, dialect, dbName, null);
+    }
+
+    /**
+     * @param ownedDataSource 若非 null，表示该 DataSource 是专为此连接器创建、
+     *                        不受 Spring 容器管理，{@link #close()} 时需要显式关闭其连接池，
+     *                        否则 register/unregister 循环会持续泄漏 HikariCP 连接池与线程。
+     */
+    public JdbcDataSourceConnector(JdbcTemplate jdbc, String dialect, String dbName, DataSource ownedDataSource) {
         this.jdbc = jdbc;
         this.dialect = dialect.toLowerCase();
         this.dbName = dbName;
+        this.ownedDataSource = ownedDataSource;
     }
 
     @Override
@@ -106,7 +123,21 @@ public class JdbcDataSourceConnector implements DataSourceConnector {
 
     @Override
     public void close() {
-        // JdbcTemplate is managed by Spring; no explicit close needed
+        // Spring 管理的默认数据源无需在此关闭；仅当本连接器持有自建连接池
+        // （registerJdbc 动态注册场景）时才需要显式关闭，否则会话结束后连接池/线程永不释放
+        if (ownedDataSource instanceof Closeable closeable) {
+            try {
+                closeable.close();
+            } catch (IOException e) {
+                log.warn("Failed to close owned datasource for {}: {}", dbName, e.getMessage());
+            }
+        } else if (ownedDataSource instanceof AutoCloseable closeable) {
+            try {
+                closeable.close();
+            } catch (Exception e) {
+                log.warn("Failed to close owned datasource for {}: {}", dbName, e.getMessage());
+            }
+        }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

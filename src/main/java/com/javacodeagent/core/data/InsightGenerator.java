@@ -82,7 +82,7 @@ public class InsightGenerator {
             }))
             .doOnError(e -> log.error("Insight generation failed", e))
             .onErrorReturn(new InsightResult(chartSpec,
-                chartSpec.getThought() != null ? chartSpec.getThought() : ""));
+                chartSpec.getThought() != null ? chartSpec.getThought() : "", true));
     }
 
     private String formatDataSample(List<Map<String, Object>> rows, int limit) {

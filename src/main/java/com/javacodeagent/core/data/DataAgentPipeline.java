@@ -1,6 +1,5 @@
 package com.javacodeagent.core.data;
 
-import com.javacodeagent.core.data.DataAgentConstants;
 import com.javacodeagent.core.data.model.ChartSpec;
 import com.javacodeagent.core.data.model.DataAnalysisReport;
 import com.javacodeagent.core.data.model.DataQueryRequest;
@@ -25,6 +24,7 @@ import reactor.core.scheduler.Schedulers;
 public class DataAgentPipeline {
 
     private final DataSourceConnector connector;
+    private final DataSourceManager dataSourceManager;
     private final SchemaRetriever schemaRetriever;
     private final Nl2SqlService nl2SqlService;
     private final SqlValidator sqlValidator;
@@ -38,8 +38,10 @@ public class DataAgentPipeline {
         if (request == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
             return Mono.error(new IllegalArgumentException("Question must not be blank"));
         }
-        return schemaRetriever.retrieve(request.getQuestion())
-            .flatMap(schema -> nl2SqlService.generateSql(request.getQuestion(), schema))
+        DataSourceConnector targetConnector = resolveConnector(request.getDataSourceId());
+        String dsId = request.getDataSourceId() != null ? request.getDataSourceId() : "default";
+        return schemaRetriever.retrieve(request.getQuestion(), targetConnector, dsId)
+            .flatMap(schema -> nl2SqlService.generateSql(dsId, request.getQuestion(), schema))
             .flatMap(nl2SqlResult -> validateAndExecute(nl2SqlResult, request.getMaxRows()))
             .flatMap(chartSpec -> insightGenerator.generate(request.getQuestion(), chartSpec))
             .map(insight -> DataAnalysisReport.builder()
@@ -47,6 +49,7 @@ public class DataAgentPipeline {
                 .chartSpec(insight.chartSpec())
                 .insightMarkdown(insight.markdown())
                 .success(true)
+                .insightFailed(insight.failed())
                 .build())
             .doOnError(e -> log.error("Data analysis failed: {}", e.getMessage()))
             .onErrorResume(e -> Mono.just(DataAnalysisReport.error(
@@ -69,12 +72,14 @@ public class DataAgentPipeline {
                 sse("{\"type\":\"done\"}")
             );
         }
+        DataSourceConnector targetConnector = resolveConnector(request.getDataSourceId());
+        String dsId = request.getDataSourceId() != null ? request.getDataSourceId() : "default";
         return Flux.concat(
             Flux.just(sse("{\"type\":\"started\",\"question\":" + jsonStr(request.getQuestion()) + "}")),
-            schemaRetriever.retrieve(request.getQuestion())
+            schemaRetriever.retrieve(request.getQuestion(), targetConnector, dsId)
                 .flatMapMany(schema -> Flux.concat(
                     Flux.just(sse("{\"type\":\"schema_retrieved\",\"length\":" + schema.length() + "}")),
-                    nl2SqlService.generateSql(request.getQuestion(), schema)
+                    nl2SqlService.generateSql(dsId, request.getQuestion(), schema)
                         .flatMapMany(nl2SqlResult -> Flux.concat(
                             Flux.just(sse("{\"type\":\"sql_generated\",\"sql\":" + jsonStr(nl2SqlResult.getSql())
                                 + ",\"displayType\":" + jsonStr(nl2SqlResult.getDisplayType()) + "}")),
@@ -85,7 +90,8 @@ public class DataAgentPipeline {
                                         Flux.just(sse("{\"type\":\"sql_executed\",\"rowCount\":" + rowCount + "}")),
                                         insightGenerator.generate(request.getQuestion(), chartSpec)
                                             .flatMapMany(insight -> Flux.just(
-                                                sse("{\"type\":\"insight_ready\",\"markdown\":" + jsonStr(insight.markdown()) + "}"),
+                                                sse("{\"type\":\"insight_ready\",\"markdown\":" + jsonStr(insight.markdown())
+                                                    + ",\"failed\":" + insight.failed() + "}"),
                                                 sse("{\"type\":\"done\"}")
                                             ))
                                     );
@@ -101,8 +107,13 @@ public class DataAgentPipeline {
     // ── 仅生成 SQL（不执行） ──────────────────────────────────────────────────
 
     public Mono<Nl2SqlResult> generateSqlOnly(DataQueryRequest request) {
-        return schemaRetriever.retrieve(request.getQuestion())
-            .flatMap(schema -> nl2SqlService.generateSql(request.getQuestion(), schema));
+        if (request == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
+            return Mono.error(new IllegalArgumentException("Question must not be blank"));
+        }
+        DataSourceConnector targetConnector = resolveConnector(request.getDataSourceId());
+        String dsId = request.getDataSourceId() != null ? request.getDataSourceId() : "default";
+        return schemaRetriever.retrieve(request.getQuestion(), targetConnector, dsId)
+            .flatMap(schema -> nl2SqlService.generateSql(dsId, request.getQuestion(), schema));
     }
 
     // ── 执行已有 SQL ──────────────────────────────────────────────────────────
@@ -118,22 +129,32 @@ public class DataAgentPipeline {
     // ── Dashboard（多图） ─────────────────────────────────────────────────────
 
     public Mono<DashboardSpec> generateDashboard(DataQueryRequest request) {
-        return dashboardGenerator.generate(request.getQuestion());
+        DataSourceConnector targetConnector = resolveConnector(request.getDataSourceId());
+        String dsId = request.getDataSourceId() != null ? request.getDataSourceId() : "default";
+        return dashboardGenerator.generate(request.getQuestion(), targetConnector, dsId);
     }
 
     // ── Schema 信息 ───────────────────────────────────────────────────────────
 
     /**
      * 返回当前数据源的 Schema 概要（表名列表、方言、数据库名）。
-     * listTables() 是阻塞 JDBC 调用，必须切换到 boundedElastic 线程，
-     * 否则会阻塞 Netty IO 事件循环。
      */
     public Mono<Map<String, Object>> getSchema() {
+        return getSchema(null);
+    }
+
+    /**
+     * 返回指定数据源的 Schema 概要。
+     *
+     * @param dataSourceId 数据源 ID（null 表示使用默认数据源）
+     */
+    public Mono<Map<String, Object>> getSchema(String dataSourceId) {
+        DataSourceConnector targetConnector = resolveConnector(dataSourceId);
         return Mono.fromCallable(() -> {
-            List<String> tables = connector.listTables();
+            List<String> tables = targetConnector.listTables();
             return Map.<String, Object>of(
-                "database", connector.getDatabaseName(),
-                "dialect", connector.getDialect(),
+                "database", targetConnector.getDatabaseName(),
+                "dialect", targetConnector.getDialect(),
                 "tables", tables,
                 "tableCount", tables.size()
             );
@@ -145,6 +166,22 @@ public class DataAgentPipeline {
     /** 将 JSON 字符串包装为 SSE data 行（格式：{@code data: <json>\n\n}）。 */
     private static String sse(String json) {
         return "data: " + json + "\n\n";
+    }
+
+    /**
+     * 按 dataSourceId 解析连接器。
+     * null / 空字符串时返回默认连接器。
+     */
+    private DataSourceConnector resolveConnector(String dataSourceId) {
+        if (dataSourceId == null || dataSourceId.isBlank()) {
+            return connector;
+        }
+        try {
+            return dataSourceManager.getConnector(dataSourceId);
+        } catch (IllegalArgumentException e) {
+            log.warn("DataSource '{}' not found, using default: {}", dataSourceId, e.getMessage());
+            return connector;
+        }
     }
 
     private Mono<ChartSpec> validateAndExecute(Nl2SqlResult nl2SqlResult, int maxRows) {

@@ -47,6 +47,13 @@ public class ExcelDataSourceConnector {
 
     private static final Pattern UNSAFE = Pattern.compile("[^a-zA-Z0-9]");
 
+    // 内部生成的表名固定格式为 "tbl_" + 12 位十六进制 UUID 片段（见 importFile）。
+    // getTableInfo/getSampleRows 的 tableName 直接来自客户端请求体（未经 SqlValidator），
+    // 必须先校验格式再拼接进 SQL，否则可构造出如
+    // {"tableName":"x\" UNION SELECT ... --"} 的标识符注入攻击。
+    private static final Pattern VALID_TABLE_NAME =
+        Pattern.compile("^tbl_[a-f0-9]{" + DataAgentConstants.TABLE_NAME_UUID_LENGTH + "}$");
+
     private final JdbcTemplate jdbc;
     private final LLMClient llmClient;
     private final ObjectMapper objectMapper;
@@ -55,6 +62,12 @@ public class ExcelDataSourceConnector {
         this.jdbc = jdbc;
         this.llmClient = llmClient;
         this.objectMapper = objectMapper;
+    }
+
+    private void validateTableName(String tableName) {
+        if (tableName == null || !VALID_TABLE_NAME.matcher(tableName).matches()) {
+            throw new IllegalArgumentException("Invalid table name: " + tableName);
+        }
     }
 
     /**
@@ -85,6 +98,7 @@ public class ExcelDataSourceConnector {
      */
     public String getTableInfo(String tableName) {
         try {
+            validateTableName(tableName);
             List<String> columns = getColumns(tableName);
             List<String> sampleRows = getSampleRows(tableName, DataAgentConstants.DEFAULT_SAMPLE_ROWS);
             StringBuilder sb = new StringBuilder();
@@ -271,6 +285,9 @@ public class ExcelDataSourceConnector {
     }
 
     private List<String> getSampleRows(String tableName, int n) {
+        // SQL 标识符无法用 "?" 参数化，必须在拼接前显式校验格式，
+        // 防止调用方（如 getTableInfo）遗漏校验时在此处发生标识符注入
+        validateTableName(tableName);
         List<java.util.Map<String, Object>> rows = jdbc.queryForList(
             "SELECT * FROM \"" + tableName + "\" LIMIT " + n);
         return rows.stream()

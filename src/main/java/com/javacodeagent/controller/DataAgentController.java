@@ -1,11 +1,17 @@
 package com.javacodeagent.controller;
 
 import com.javacodeagent.core.data.DataAgentPipeline;
+import com.javacodeagent.core.data.DataSourceManager;
+import com.javacodeagent.core.data.MetricAnalysisPipeline;
+import com.javacodeagent.core.data.MetricInfoRetriever;
+import com.javacodeagent.core.data.SchemaRetriever;
 import com.javacodeagent.core.data.agent.DataAnalysisAgent;
 import com.javacodeagent.core.data.model.DataAnalysisReport;
 import com.javacodeagent.core.data.model.DashboardSpec;
 import com.javacodeagent.core.data.model.DataQueryRequest;
 import com.javacodeagent.core.data.model.DataQueryResult;
+import com.javacodeagent.core.data.model.MetricAnalysisReport;
+import com.javacodeagent.core.data.model.MetricAnalysisRequest;
 import com.javacodeagent.core.data.model.MultiAnalysisReport;
 import com.javacodeagent.core.data.model.Nl2SqlResult;
 import com.javacodeagent.core.agent.AgentContext;
@@ -16,15 +22,19 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -36,6 +46,10 @@ public class DataAgentController {
 
     private final DataAgentPipeline pipeline;
     private final DataAnalysisAgent dataAnalysisAgent;
+    private final DataSourceManager dataSourceManager;
+    private final SchemaRetriever schemaRetriever;
+    private final MetricInfoRetriever metricInfoRetriever;
+    private final MetricAnalysisPipeline metricAnalysisPipeline;
     private final ObjectMapper objectMapper;
 
     /**
@@ -94,12 +108,174 @@ public class DataAgentController {
 
     /**
      * 获取数据库 Schema 概览。
-     * 当前为单数据源模式；多数据源路由可在 DataAgentPipeline.getSchema() 中扩展。
+     * 可选 ?dataSourceId=xxx 指定数据源；未指定时使用默认数据源。
      */
     @GetMapping("/schema")
-    public Mono<ResponseEntity<Map<String, Object>>> schema() {
-        return pipeline.getSchema()
+    public Mono<ResponseEntity<Map<String, Object>>> schema(
+            @RequestParam(required = false) String dataSourceId) {
+        return pipeline.getSchema(dataSourceId)
             .map(ResponseEntity::ok);
+    }
+
+    // ── 多数据源管理 ───────────────────────────────────────────────────────────
+
+    /** 列出所有已注册的数据源。 */
+    @GetMapping("/datasources")
+    public ResponseEntity<List<DataSourceManager.DataSourceInfo>> listDataSources() {
+        return ResponseEntity.ok(dataSourceManager.listDataSources());
+    }
+
+    /**
+     * 动态注册外部数据源。
+     *
+     * <pre>
+     * {
+     *   "id":          "my-mysql",
+     *   "url":         "jdbc:mysql://host:3306/mydb",
+     *   "username":    "root",
+     *   "password":    "secret",
+     *   "driverClass": "com.mysql.cj.jdbc.Driver",   // 可选
+     *   "dialect":     "mysql",
+     *   "dbName":      "mydb",
+     *   "description": "生产 MySQL"
+     * }
+     * </pre>
+     */
+    @PostMapping("/datasources")
+    public ResponseEntity<Map<String, String>> registerDataSource(@RequestBody Map<String, String> body) {
+        String id = body.get("id");
+        if (id == null || id.isBlank()) {
+            id = "ds-" + UUID.randomUUID().toString().substring(0, 8);
+        }
+        String url = body.get("url");
+        if (url == null || url.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "url is required"));
+        }
+        try {
+            dataSourceManager.registerJdbc(
+                id,
+                url,
+                body.getOrDefault("username", ""),
+                body.getOrDefault("password", ""),
+                body.getOrDefault("driverClass", ""),
+                body.getOrDefault("dialect", "mysql"),
+                body.getOrDefault("dbName", ""),
+                body.getOrDefault("description", "")
+            );
+            return ResponseEntity.ok(Map.of("id", id, "status", "registered"));
+        } catch (Exception e) {
+            log.warn("Failed to register datasource '{}': {}", id, e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** 注销数据源（不能注销 default），同时清理 Schema 向量索引缓存。 */
+    @DeleteMapping("/datasources/{id}")
+    public ResponseEntity<Map<String, String>> unregisterDataSource(@PathVariable String id) {
+        try {
+            dataSourceManager.unregister(id);
+            // 数据源已移除，清理对应的 Schema 向量索引，防止陈旧向量占用内存
+            schemaRetriever.invalidateIndex(id);
+            return ResponseEntity.ok(Map.of("id", id, "status", "unregistered"));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** 清除指定数据源的 Schema 向量索引缓存（表结构变更后调用）。 */
+    @PostMapping("/datasources/{id}/invalidate-schema-index")
+    public ResponseEntity<Map<String, String>> invalidateSchemaIndex(@PathVariable String id) {
+        if (!dataSourceManager.contains(id)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Datasource not found: " + id));
+        }
+        schemaRetriever.invalidateIndex(id);
+        return ResponseEntity.ok(Map.of("id", id, "status", "index_invalidated"));
+    }
+
+    // ── 指标体系 ───────────────────────────────────────────────────────────────
+
+    /**
+     * 列出所有已注册的指标定义。
+     */
+    @GetMapping("/metrics")
+    public ResponseEntity<List<MetricInfoRetriever.MetricDefinition>> listMetrics() {
+        return ResponseEntity.ok(metricInfoRetriever.listMetrics());
+    }
+
+    /**
+     * 动态注册指标定义。
+     *
+     * <pre>
+     * {
+     *   "name":        "daily_order_count",
+     *   "displayName": "日订单量",
+     *   "table":       "orders",
+     *   "valueColumn": "order_id",
+     *   "timeColumn":  "created_at",
+     *   "aggregation": "COUNT",
+     *   "dimensions":  ["region", "product_type"],
+     *   "description": "每日新增订单数量"
+     * }
+     * </pre>
+     */
+    @PostMapping("/metrics")
+    public ResponseEntity<Map<String, String>> registerMetric(@RequestBody Map<String, Object> body) {
+        try {
+            String name        = (String) body.get("name");
+            String displayName = (String) body.getOrDefault("displayName", name);
+            String table       = (String) body.get("table");
+            String valueColumn = (String) body.get("valueColumn");
+            String timeColumn  = (String) body.getOrDefault("timeColumn", null);
+            String aggregation = (String) body.getOrDefault("aggregation", "SUM");
+            String description = (String) body.getOrDefault("description", "");
+            String currentSql  = (String) body.getOrDefault("currentValueSql", null);
+            String historySql  = (String) body.getOrDefault("historySql", null);
+            @SuppressWarnings("unchecked")
+            List<String> dimensions = body.get("dimensions") instanceof List<?> l
+                ? (List<String>) l : List.of();
+
+            if (name == null || table == null || valueColumn == null) {
+                return ResponseEntity.badRequest().body(Map.of("error", "name, table, valueColumn are required"));
+            }
+
+            metricInfoRetriever.register(new MetricInfoRetriever.MetricDefinition(
+                name, displayName, table, valueColumn, timeColumn,
+                aggregation, dimensions, currentSql, historySql, description));
+
+            return ResponseEntity.ok(Map.of("name", name, "status", "registered"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * 注销指标定义。
+     */
+    @DeleteMapping("/metrics/{name}")
+    public ResponseEntity<Map<String, String>> unregisterMetric(@PathVariable String name) {
+        metricInfoRetriever.unregister(name);
+        return ResponseEntity.ok(Map.of("name", name, "status", "unregistered"));
+    }
+
+    /**
+     * 指标归因分析（完整链路：MetricInfo → Anomaly + Volatility → Report）。
+     *
+     * <pre>
+     * { "metricName": "daily_order_count", "lookbackDays": 30 }
+     * </pre>
+     */
+    @PostMapping("/metric-analysis")
+    public Mono<ResponseEntity<MetricAnalysisReport>> metricAnalysis(
+            @RequestBody MetricAnalysisRequest request) {
+        return metricAnalysisPipeline.analyze(request)
+            .map(ResponseEntity::ok)
+            .onErrorResume(e -> {
+                log.error("Metric analysis error: {}", e.getMessage(), e);
+                return Mono.just(ResponseEntity.ok(
+                    MetricAnalysisReport.error(
+                        request != null ? request.getMetricName() : "unknown",
+                        e.getMessage())));
+            });
     }
 
     /**

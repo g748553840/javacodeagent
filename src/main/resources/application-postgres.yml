@@ -14,7 +14,10 @@ data-agent:
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:agentdb}
     username: ${POSTGRES_USER:agent}
-    password: ${POSTGRES_PASSWORD:agentsecret}
+    # 不提供默认密码：与 docker-compose-pg.yml 的 ${POSTGRES_PASSWORD:?...} 保持一致，
+    # 强制要求显式配置，避免脱离 docker-compose 直接以 java -jar 启动时静默落到
+    # 一个公开可猜的默认密码（历史上此处曾是 :agentsecret）。
+    password: ${POSTGRES_PASSWORD}
     driver-class-name: org.postgresql.Driver
 
 logging:

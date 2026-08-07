@@ -53,15 +53,26 @@ public class ExcelAnalysisController {
     @PostMapping("/upload")
     public Mono<ResponseEntity<Map<String, Object>>> upload(@RequestPart("file") FilePart filePart) {
         String filename = filePart.filename();
+        // 累计已读字节数并提前中断，避免超大文件在达到上限前继续占用内存；
+        // DataBufferUtils.join 内部按需增长缓冲区，不做 O(n²) 的手工数组拷贝
+        long[] totalBytes = {0};
         return filePart.content()
-            .reduce(new byte[0], (acc, buf) -> {
+            .handle((buf, sink) -> {
+                totalBytes[0] += buf.readableByteCount();
+                if (totalBytes[0] > DataAgentConstants.EXCEL_UPLOAD_MAX_BYTES) {
+                    DataBufferUtils.release(buf);
+                    sink.error(new IllegalArgumentException(
+                        "File exceeds max upload size of " + (DataAgentConstants.EXCEL_UPLOAD_MAX_BYTES / (1024 * 1024)) + "MB"));
+                } else {
+                    sink.next(buf);
+                }
+            })
+            .as(DataBufferUtils::join)
+            .map(buf -> {
                 try {
-                    byte[] chunk = new byte[buf.readableByteCount()];
-                    buf.read(chunk);
-                    byte[] merged = new byte[acc.length + chunk.length];
-                    System.arraycopy(acc, 0, merged, 0, acc.length);
-                    System.arraycopy(chunk, 0, merged, acc.length, chunk.length);
-                    return merged;
+                    byte[] bytes = new byte[buf.readableByteCount()];
+                    buf.read(bytes);
+                    return bytes;
                 } finally {
                     DataBufferUtils.release(buf);
                 }
@@ -110,7 +121,9 @@ public class ExcelAnalysisController {
         // 不能直接在 Netty IO 线程调用后再进入响应式链
         return Mono.fromCallable(() -> excelConnector.getTableInfo(tableName))
             .subscribeOn(Schedulers.boundedElastic())
-            .flatMap(schema -> nl2SqlService.generateSql(question, schema))
+            // tableName 作为 SQL 缓存的隔离键：每次 /upload 都生成唯一表名，
+            // 用它代替 dataSourceId 可防止不同上传文件的相同问法互相串用缓存的 SQL
+            .flatMap(schema -> nl2SqlService.generateSql(tableName, question, schema))
             .flatMap(nl2SqlResult -> {
                 SqlValidationResult valid = sqlValidator.validate(nl2SqlResult.getSql());
                 if (!valid.isAllowed()) {
@@ -127,6 +140,7 @@ public class ExcelAnalysisController {
                             .chartSpec(insight.chartSpec())
                             .insightMarkdown(insight.markdown())
                             .success(true)
+                            .insightFailed(insight.failed())
                             .build());
                 });
             })

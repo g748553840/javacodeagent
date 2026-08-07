@@ -244,6 +244,12 @@ public class ConversationController {
         if (entry.getUserId() == null || entry.getUserId().isBlank()) {
             entry.setUserId(extractUserId(exchange));
         }
+        if (entry.getType() == null) {
+            // MemoryService.persistMemoryToFile() 直接调用 entry.getType().name()，
+            // 缺失 type 时会抛出未捕获的 NPE 并冒泡为 500；在入口处提前校验，
+            // 返回可读的 400 错误而非让调用方看到一个模糊的服务端异常
+            return ResponseEntity.badRequest().body("type is required (one of: USER, FEEDBACK, PROJECT, REFERENCE)");
+        }
         memoryService.saveMemory(entry);
         return ResponseEntity.ok("Memory saved");
     }
@@ -260,13 +266,51 @@ public class ConversationController {
         return ResponseEntity.ok(memoryService.getUserMemories(effectiveUserId));
     }
 
+    /**
+     * 记忆搜索。
+     *
+     * <p>参数：
+     * <ul>
+     *   <li>{@code keyword}（必填）：搜索词</li>
+     *   <li>{@code mode}（可选）：{@code keyword}（默认）或 {@code semantic}（向量语义搜索）</li>
+     *   <li>{@code topK}（可选，仅 semantic 模式有效）：返回条数上限，默认使用配置值</li>
+     * </ul>
+     *
+     * <p>semantic 模式需 {@code memory.embedding.enabled=true}，未启用时自动降级为 keyword 模式。
+     */
     @GetMapping("/memory/{userId}/search")
-    public ResponseEntity<List<MemoryEntry>> searchMemories(
+    public Mono<ResponseEntity<List<MemoryEntry>>> searchMemories(
             @PathVariable String userId,
             @RequestParam String keyword,
+            @RequestParam(defaultValue = "keyword") String mode,
+            @RequestParam(defaultValue = "0") int topK,
             ServerWebExchange exchange) {
         String effectiveUserId = resolveUserId(userId, exchange);
-        return ResponseEntity.ok(memoryService.searchMemories(effectiveUserId, keyword));
+
+        if ("semantic".equalsIgnoreCase(mode)) {
+            // 语义向量搜索（Embedding 服务未启用时内部自动降级）
+            return memoryService.semanticSearch(effectiveUserId, keyword, topK)
+                    .map(ResponseEntity::ok);
+        }
+
+        // 关键词搜索（wrap in subscribeOn 避免在 Netty IO 线程执行文件/in-memory 操作）
+        return Mono.fromCallable(() -> memoryService.searchMemories(effectiveUserId, keyword))
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(ResponseEntity::ok);
+    }
+
+    /**
+     * 返回当前 Embedding 服务状态。
+     */
+    @GetMapping("/memory/embedding-status")
+    public ResponseEntity<Map<String, Object>> embeddingStatus() {
+        boolean enabled = memoryService.isEmbeddingEnabled();
+        return ResponseEntity.ok(Map.of(
+                "enabled", enabled,
+                "note", enabled
+                        ? "Semantic search available: GET /memory/{userId}/search?keyword=...&mode=semantic"
+                        : "Embedding disabled. Set memory.embedding.enabled=true to enable."
+        ));
     }
 
     @DeleteMapping("/memory/{userId}/{memoryId}")

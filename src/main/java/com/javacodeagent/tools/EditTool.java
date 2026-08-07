@@ -86,6 +86,13 @@ public class EditTool implements Tool {
         String newString = (String) input.get("new_string");
         boolean replaceAll = input.get("replace_all") != null && (Boolean) input.get("replace_all");
 
+        if (oldString == null) {
+            return ToolExecutionResult.error("old_string is required");
+        }
+        if (newString == null) {
+            return ToolExecutionResult.error("new_string is required");
+        }
+
         try {
             Path path = pathResolver.resolve(filePath, context.getWorkingDirectory());
 

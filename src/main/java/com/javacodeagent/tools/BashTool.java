@@ -13,7 +13,6 @@ import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Component
@@ -23,7 +22,6 @@ public class BashTool implements Tool {
     private static final int DEFAULT_TIMEOUT_MS = 120_000;
 
     private final BackgroundTaskExecutor backgroundTaskExecutor;
-    private final Map<String, Process> runningProcesses = new ConcurrentHashMap<>();
 
     @Override
     public String getName() {
@@ -121,23 +119,24 @@ public class BashTool implements Tool {
             ? ((Number) input.get("timeout")).intValue()
             : DEFAULT_TIMEOUT_MS;
 
+        ProcessBuilder processBuilder = new ProcessBuilder();
+
+        String os = System.getProperty("os.name").toLowerCase();
+        if (os.contains("win")) {
+            processBuilder.command("cmd.exe", "/c", command);
+        } else {
+            processBuilder.command("bash", "-c", command);
+        }
+
+        if (context.getWorkingDirectory() != null) {
+            processBuilder.directory(context.getWorkingDirectory().toFile());
+        }
+
+        processBuilder.redirectErrorStream(true);
+
+        Process process = null;
         try {
-            ProcessBuilder processBuilder = new ProcessBuilder();
-
-            String os = System.getProperty("os.name").toLowerCase();
-            if (os.contains("win")) {
-                processBuilder.command("cmd.exe", "/c", command);
-            } else {
-                processBuilder.command("bash", "-c", command);
-            }
-
-            if (context.getWorkingDirectory() != null) {
-                processBuilder.directory(context.getWorkingDirectory().toFile());
-            }
-
-            processBuilder.redirectErrorStream(true);
-
-            Process process = processBuilder.start();
+            process = processBuilder.start();
 
             StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
@@ -167,6 +166,11 @@ public class BashTool implements Tool {
                 .build();
 
         } catch (Exception e) {
+            // 无论异常发生在启动、读取输出还是 waitFor 阶段（包括被中断），
+            // 只要进程已经启动就必须显式销毁，否则子进程会成为孤儿进程继续运行
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
             log.error("Bash command failed: {}", command, e);
             return ToolExecutionResult.error("Bash command failed: " + e.getMessage());
         }

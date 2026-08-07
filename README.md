@@ -1,6 +1,6 @@
-# Java Code Agent - AI Code Assistant
+# Java Code Agent - AI 编程与数据分析助手
 
-基于 **Java 21 + Spring Boot 3.2.5 + WebFlux** 实现的 AI 编程助手，参照 Claude Code 的架构设计思路构建。
+基于 **Java 21 + Spring Boot 3.2.5 + WebFlux** 构建的 **AI 编程和数据分析助手**，集成完整的 NL2SQL 数据分析流水线、多 Agent 协作分析与 Excel/CSV 文件分析能力，架构设计参考自 **DB-GPT**（Python/AWEL 流水线）和 **spring-ai-alibaba**（Java/Spring AI StateGraph）两个开源项目。
 
 ---
 
@@ -14,11 +14,12 @@
 6. [内置工具](#内置工具)
 7. [扩展开发](#扩展开发)
 8. [架构详解](#架构详解)
-9. [关键设计决策](#关键设计决策)
-10. [与 Claude Code 对比](#与-claude-code-对比)
-11. [开发路线图](#开发路线图)
-12. [测试](#测试)
-13. [许可证](#许可证)
+9. [Data Agent 深度解析](#data-agent-深度解析)
+10. [关键设计决策](#关键设计决策)
+11. [与 Claude Code 对比](#与-claude-code-对比)
+12. [开发路线图](#开发路线图)
+13. [测试](#测试)
+14. [许可证](#许可证)
 
 ---
 
@@ -34,10 +35,11 @@
 | **Hook 机制** | PRE/POST_TOOL_CALL 等 7 种钩子，支持拦截与审计 |
 | **上下文压缩** | 消息 > 40 条时调用 LLM 进行语义摘要，保留最近 10 条 |
 | **记忆系统** | YAML frontmatter Markdown 文件 + MEMORY.md 索引，跨会话持久化，多用户目录分区 |
+| **向量记忆检索** | LangChain4j `OpenAiEmbeddingModel`（兼容 Ollama / Qwen / DeepSeek 等本地/云模型）+ `EmbeddingStore<TextSegment>`（开发用 InMemory，PostgreSQL profile 用 PgVector 持久化），`mode=semantic` 参数切换 |
 | **计划模式** | Explore → Draft → Review → Approve → Execute 五阶段安全执行 |
 | **任务系统** | 带 blockedBy / blocks 依赖 DAG 的任务追踪，JPA 双层持久化 |
 | **Sub-Agent** | 同步 / 异步 / 并行 / 隔离（READ_ONLY）四种派发模式 |
-| **MCP 协议** | McpService 连接外部 MCP 服务器，自动发现并注册远程工具 |
+| **MCP 协议** | `McpService` 基于 LangChain4j `DefaultMcpClient` + `StreamableHttpMcpTransport` 连接外部 MCP 服务器，自动发现并注册远程工具 |
 | **对话持久化** | ConversationMessage JPA 持久化，重启后消息历史不丢失 |
 | **Token 流式** | chatStreamFull() 逐 token 流式 + 工具调用协作，实时打字机效果 |
 | **HTTP 认证** | ApiKeyAuthFilter，Bearer Token / X-API-Key 双格式鉴权；JWT 模式（JwtAuthFilter）自动从 sub claim 提取 userId |
@@ -47,6 +49,9 @@
 | **Dashboard 多图** | LLM 规划 2-4 张互补图表，并行执行，错误隔离 |
 | **多 Agent 协作分析** | DataAnalysisAgent + AnomalyDetectorAgent + VolatilityAnalysisAgent + ReportGenerationAgent 并行分析 |
 | **历史 SQL 缓存** | SqlCacheService LRU + TTL 缓存，相似问题复用 SQL，减少 LLM 调用 |
+| **多数据源管理** | `DataSourceManager` 注册/切换多个 DB 连接，HikariCP 连接池，REST API 动态注册，`dataSourceId` 路由 |
+| **查询超时告警 + 慢查询日志** | Micrometer `Timer` 记录查询耗时，超阈值 WARN 日志，`/actuator/metrics` 可读 |
+| **指标体系集成** | `MetricInfoRetriever` 注册指标定义，`MetricAnalysisPipeline` 完整归因链路（当前值+历史趋势→异常+波动→综合报告） |
 | **容器化** | Dockerfile（multi-stage, JDK 21）+ docker-compose.yml（H2）+ docker-compose-pg.yml（PostgreSQL）|
 
 ---
@@ -63,6 +68,10 @@
 - **Jackson** — JSON 序列化 / SSE 事件格式化
 - **Anthropic API** — `/v1/messages`，支持 `tool_use`、`thinking`、SSE 流式
 - **OpenAI 兼容 API** — `/v1/chat/completions`，支持 DeepSeek / GLM / Qwen / OpenAI
+- **LangChain4j**（`memory.embedding.enabled=true` / `mcp.enabled=true` 时启用）：
+  - `langchain4j-core` + `langchain4j-open-ai` — `OpenAiEmbeddingModel` 替代手写 `/v1/embeddings` 调用，`EmbeddingStore<TextSegment>` 统一向量存储抽象
+  - `langchain4j-pgvector`（**beta**）— PostgreSQL profile 下的持久化向量存储，替代纯内存 `ConcurrentHashMap` 方案
+  - `langchain4j-mcp`（**beta**）— 标准 MCP 客户端（`DefaultMcpClient` + `StreamableHttpMcpTransport`），替代手写 JSON-RPC over WebClient
 
 ---
 
@@ -352,7 +361,8 @@ POST /api/v1/plan/{planId}/reject          # 拒绝 {"reason": "..."}
 POST /api/v1/plan/{planId}/next-step       # 推进下一步骤
 POST /api/v1/plan/{planId}/complete-step   # 标记步骤完成 {"result": "..."}
 POST /api/v1/plan/{planId}/fail-step       # 标记步骤失败 {"error": "..."}
-POST /api/v1/plan/{planId}/execute         # 批量推进所有步骤状态
+POST /api/v1/plan/{planId}/execute         # ⚠️ 仅批量推进步骤状态为 COMPLETED，不执行任何真实文件/Shell操作，
+                                            #    需要真实执行效果请改用 next-step + complete-step/fail-step 组合
 GET  /api/v1/plan/{planId}                 # 查看计划详情
 ```
 
@@ -940,8 +950,8 @@ public class ConversationContext {
 
 | 级别 | 允许的操作 | 适用场景 |
 |------|-----------|---------|
-| `READ_ONLY` | 仅 FILE_READ | 隔离 Agent、只读探索 |
-| `SAFE` | FILE_READ + FILE_WRITE | 默认级别 |
+| `READ_ONLY` | FILE_READ + DATABASE_READ | 隔离 Agent、只读探索 |
+| `SAFE` | FILE_READ + FILE_WRITE + DATABASE_READ + GIT_OPERATION | 默认级别 |
 | `NORMAL` | 除 CONFIG_MODIFY 外全部 | 完整开发任务 |
 | `ALL` | 所有操作 | 高度信任场景 |
 
@@ -1059,6 +1069,86 @@ metadata:
 ```
 
 `searchMemories(userId, keyword)` 同时匹配 `content` / `name` / `description` 三个字段（大小写不敏感）。
+
+---
+
+### 9. 向量记忆检索
+
+#### 架构（LangChain4j 集成）
+
+```
+POST /api/v1/memory（保存记忆）
+    │
+    └──► MemoryService.saveMemory()
+              │ fire-and-forget（不阻塞响应）
+              ▼ Schedulers.boundedElastic()
+         EmbeddingModel.embed(name + description + content)   ◄── langchain4j-open-ai
+              │ OpenAiEmbeddingModel（兼容 OpenAI/Ollama/Qwen/DeepSeek 等端点）
+              ▼
+         EmbeddingStore<TextSegment>.add(embedding, segment)   ◄── langchain4j-core / pgvector
+              ├── dev profile: InMemoryEmbeddingStore（进程内，重启丢失，零依赖）
+              └── postgres profile: PgVectorEmbeddingStore（持久化，重启不丢失，可水平扩展）
+              Metadata 携带 userId/memoryId，检索时用 Filter 按用户隔离
+
+GET /api/v1/memory/{userId}/search?keyword=...&mode=semantic
+    │
+    ▼ EmbeddingModel.embed(keyword)
+    │
+    ▼ EmbeddingStore.search(EmbeddingSearchRequest{queryEmbedding, maxResults, minScore, filter})
+    │  pgvector 走 SQL 端 ANN 索引；InMemory 走库内实现的暴力扫描
+    ▼
+List<MemoryEntry>（按语义相似度排列）
+```
+
+**关键设计：**
+- **EmbeddingModel**（langchain4j-open-ai 提供的 `OpenAiEmbeddingModel`）替代手写 `OpenAICompatibleEmbeddingClient`，`baseUrl`/`apiKey`/`modelName` 映射自现有 `memory.embedding.*` 配置，字段不变，兼容端点不变（OpenAI/阿里云通义/DeepSeek/Ollama/LM Studio）
+- **EmbeddingStore\<TextSegment\>** 替代手写的 `MemoryEmbeddingStore`（双层 `ConcurrentHashMap` + 手写余弦相似度）：开发环境用 `InMemoryEmbeddingStore`（行为与旧实现等价，零依赖），生产 PostgreSQL profile 下用 `PgVectorEmbeddingStore`（真正的向量索引 + 持久化，解决"记忆量上去后线性扫描是瓶颈、重启后向量全部丢失需要重新计算"的问题）
+- 两个 Bean 均通过 `@ConditionalOnProperty(memory.embedding.enabled=true)` 条件注册，`MemoryService` 用 `@Autowired(required=false)` 注入——未启用时保持 null，自动降级为关键词搜索，行为与现状完全一致
+- **启动时后台批量补齐**：逻辑不变，仍通过 `Flux.flatMap(concurrency=4)` 异步为所有已加载记忆生成 embedding，不阻塞 Spring 初始化
+- ⚠️ **beta 依赖风险**：`langchain4j-pgvector` 目前是 beta 版本，API 可能变动；`docker-compose-pg.yml` 中的 Postgres 镜像需换成 `pgvector/pgvector:pg16`（或手动 `CREATE EXTENSION vector`）才能使用
+
+#### 配置
+
+```yaml
+memory:
+  embedding:
+    enabled: true                          # 开启向量检索
+    provider: openai                       # 仅用于日志
+    api-key: ${LLM_API_KEY:}             # 与 LLM 共用同一个 key
+    model: text-embedding-3-small         # OpenAI: 1536 维
+    endpoint: https://api.openai.com/v1  # 替换为实际基础 URL
+    dimensions: 1536                       # 与 model 输出维度一致
+    top-k: 5                               # 语义搜索默认返回条数
+    similarity-threshold: 0.5            # 余弦相似度下限
+```
+
+**兼容的 Embedding 服务：**
+
+| 服务 | 模型示例 | endpoint |
+|------|---------|---------|
+| OpenAI | `text-embedding-3-small`（1536d） | `https://api.openai.com/v1` |
+| 阿里云通义 | `text-embedding-v3`（1024d） | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| DeepSeek | `deepseek-embedding`（1536d） | `https://api.deepseek.com/v1` |
+| Ollama（≥0.4） | `nomic-embed-text`（768d） | `http://localhost:11434/v1` |
+| LM Studio | 任意本地模型 | `http://localhost:1234/v1` |
+
+> ⚠️ **注意**：Anthropic API 不提供 Embedding 端点，使用 Anthropic 作为 LLM 时请配置独立的 `memory.embedding.endpoint` 指向 OpenAI 或其他兼容服务。
+
+#### API
+
+```bash
+# 关键词搜索（默认，memory.embedding.enabled 无影响）
+GET /api/v1/memory/{userId}/search?keyword=Spring
+
+# 语义向量搜索（需 memory.embedding.enabled=true）
+GET /api/v1/memory/{userId}/search?keyword=如何优化性能&mode=semantic&topK=5
+
+# 查询 Embedding 服务状态
+GET /api/v1/memory/embedding-status
+# 响应：{"enabled": true, "note": "Semantic search available: ..."}
+```
+
+`mode=semantic` 在 Embedding 服务未启用或查询向量生成失败时，自动静默降级为关键词搜索，不影响现有功能。
 
 ---
 
@@ -1180,7 +1270,7 @@ CompletableFuture<AgentResult> isolated = agentManager.launchIsolatedAgent(task,
 
 ---
 
-### 14. MCP 协议支持
+### 14. MCP 协议支持（LangChain4j 集成）
 
 ```
 mcp.servers: "fs=http://localhost:3001,gh=http://localhost:3002"
@@ -1190,15 +1280,16 @@ mcp.servers: "fs=http://localhost:3001,gh=http://localhost:3002"
                   │
       ┌───────────┴───────────┐
       │                       │
-HttpMcpClient("fs")   HttpMcpClient("gh")
-      │ connect() + listTools()
+DefaultMcpClient("fs")   DefaultMcpClient("gh")   ◄── langchain4j-mcp
+      │ StreamableHttpMcpTransport + listTools()
+      │ 返回 List<ToolSpecification>
       ▼
 McpProxyTool("mcp__fs__read_file")
-      │
+      │ execute() → mcpClient.executeTool(ToolExecutionRequest)
       └──→ toolManager.registerTool()  ← 直接注册到 ToolManager
 ```
 
-使用 Streamable HTTP 传输层（JSON-RPC 2.0）。工具命名规范：`mcp__{server-name}__{tool-name}`，避免与内置工具冲突。
+使用 LangChain4j `langchain4j-mcp`（**beta**）的 `DefaultMcpClient` + `StreamableHttpMcpTransport` 替代手写 JSON-RPC over `WebClient`，获得标准的通知/重连/工具列表缓存处理。工具命名规范不变：`mcp__{server-name}__{tool-name}`，避免与内置工具冲突；`Tool` 接口与 `ToolManager` 注册逻辑均未改动。
 
 ### 15. API 安全认证
 
@@ -1320,6 +1411,429 @@ Key 标准化：`trim → lowercase → 合并空白 → 移除中英文标点`�
 
 ---
 
+## Data Agent 深度解析
+
+> 数据分析智能体（Data Agent）的架构设计参考自两个开源项目：**DB-GPT**（Python + AWEL DAG 流水线）和 **spring-ai-alibaba**（Java + Spring AI StateGraph），结合 javacodeagent 技术栈（Java 21 + WebFlux + JDBC）实现了一套完整的 NL2SQL 数据分析流水线。
+
+### 设计参考对比
+
+| 维度 | DB-GPT | spring-ai-alibaba | javacodeagent |
+|------|--------|-------------------|---------------|
+| 语言 | Python 3.10+ | Java 21 / Spring Boot | Java 21 / Spring Boot |
+| 流水线 | AWEL（Agentic Workflow Expression Language）DAG | StateGraph（有向图，类 LangGraph） | Reactor `Mono` 链式编排 |
+| Agent 模型 | ConversableAgent + Action 插件机制 | ReactAgent + ToolNode + NodeAction | DataAnalysisAgent（Java 21 虚拟线程） |
+| 数据源抽象 | `BaseConnector` → `RDBMSConnector`（SQLAlchemy） | `JdbcTemplate` + `DataSource` | `DataSourceConnector` 接口 + `JdbcDataSourceConnector` |
+| SQL 生成 | LLM + SchemaLinkingOperator（RAG 增强） | LLM + 强制工具调用（`sql_db_schema`） | `Nl2SqlService`（关键词匹配，向量检索待实现） |
+| 可视化 | GPT-Vis 协议（`VisChart` / `VisDashboard`） | 无内置，输出文本/JSON | GPT-Vis 8 种图表类型 + `DashboardSpec` |
+| 多 Agent | ConversableAgent 链式（`receive → act → send`） | StateGraph 节点编排 + ReactAgent 循环 | Java 21 虚拟线程并行（`CompletableFuture.allOf`） |
+| Excel 分析 | `Excel2TableAgent` + DuckDB 内存表 | — | `ExcelDataSourceConnector` → H2 内存表 |
+| SQL 缓存 | — | — | `SqlCacheService`（LRU 500 + TTL 1h） |
+
+---
+
+### 核心数据流
+
+```
+用户自然语言问题
+        │
+        ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │               DataAgentPipeline（Mono 链式编排）          │
+  │  Schema 检索 → NL2SQL → SQL 校验 → 执行 → 洞察生成        │
+  └─────────────────────────────────────────────────────────┘
+        │
+        ├──► SchemaRetriever（关键词匹配；表数 ≥50 时可切换 Embedding 向量检索）
+        │       → 相关表 DDL + 样例行（CREATE TABLE + 3行数据，仿 Rajkumar et al. 2022）
+        │
+        ├──► Nl2SqlService（LLMClient）→ Nl2SqlResult { sql, display_type, thought }
+        │       └── SqlCacheService（LRU 500 + TTL 1h）命中则跳过 LLM 调用
+        │
+        ├──► SqlValidator（执行前强制拦截，不可绕过）
+        │       → 拦截 12 个危险关键词；单引号字面量豁免；行/块注释剥离防注入
+        │
+        ├──► SqlExecutor（Schedulers.boundedElastic()）→ DataQueryResult { columns, rows }
+        │
+        └──► InsightGenerator（LLMClient）→ InsightResult { chartSpec, markdown }
+                → switchIfEmpty 降级：LLM 空内容时回退到 thought 字段文本
+```
+
+**分层架构（Data Agent 专用）：**
+
+```
+┌──────────────────────────────────────────────────────┐
+│               接口层（REST / SSE）                     │
+│  DataAgentController  /api/v1/data-agent/*            │
+│  ExcelAnalysisController  /api/v1/data-agent/excel/*  │
+└──────────────────────────┬───────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────┐
+│               编排层（Pipeline）                       │
+│  DataAgentPipeline（单图）                             │
+│  DashboardGenerator（多图，Flux.flatMap 并行）          │
+│  DataAnalysisAgent（多 Agent 协作，虚拟线程）           │
+└──────────────────────────┬───────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────┐
+│               核心能力层                               │
+│  SchemaRetriever │ Nl2SqlService │ SqlCacheService    │
+│  SqlValidator    │ SqlExecutor   │ InsightGenerator   │
+└──────────────────────────┬───────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────┐
+│               数据源层                                 │
+│  JdbcDataSourceConnector（MySQL / PostgreSQL / H2）   │
+│  ExcelDataSourceConnector（.xlsx / .csv → H2 内存表） │
+└──────────────────────────────────────────────────────┘
+```
+
+---
+
+### NL2SQL Prompt 工程
+
+`Nl2SqlService` 使用以下结构化系统提示（参考 DB-GPT `HODatasourceRetrieverOperator` 模板）：
+
+```
+你是数据库专家。
+数据库名：{db_name}
+表结构定义：{table_info}
+约束：
+  1. 根据用户意图生成语法正确的 {dialect} SQL
+  2. 除非用户指定行数，限制结果最多 {max_num_results} 条
+  3. 只用提供的表，不能捏造列名
+  4. 注意表与列的关系，检查 SQL 正确性，优化查询性能
+  5. 从以下展示方式中选最优一种：
+     response_line_chart / response_bar_chart / response_pie_chart /
+     response_table / response_scatter_chart / response_area_chart /
+     response_heatmap / response_donut_chart
+用户问题：{user_input}
+按以下 JSON 格式回答：
+  {"thoughts": "...", "sql": "...", "display_type": "..."}
+```
+
+**Schema 表示格式（仿 Rajkumar et al. 2022）：**
+```sql
+CREATE TABLE "sales" (
+  "region" VARCHAR,
+  "month"  VARCHAR,
+  "amount" BIGINT
+)
+/*
+3 rows from sales:
+region  month    amount
+华东    2024-01  1200000
+华南    2024-01   980000
+华北    2024-01   750000
+*/
+```
+
+**Schema 检索策略：**
+
+| 场景 | 策略 | 实现 |
+|------|------|------|
+| 表数 ≤ 10 | 全量 Schema 直接传入 | `connector.getTableInfo(allTables)` |
+| 表数 11-50 | 关键词匹配（问题词 ∩ 表名/列名） | `codePointCount ≥ 2` 过滤短词（修复 CJK 单字误过滤） |
+| 表数 > 50 | 向量检索（待实现） | Embedding + ChromaDB/Milvus |
+
+**DB-GPT StateGraph 的 Schema 获取流程（spring-ai-alibaba 参考实现）：**
+```
+list_tables（ListTablesNode）
+  → call_get_schema（CallGetSchemaNode，internalToolExecutionEnabled=false）
+  → get_schema（ToolNode，LLM 决定查哪些表）
+  → generate_query（ReactAgent，携带完整 Schema，自动修正失败 SQL）
+```
+
+---
+
+### GPT-Vis 可视化协议
+
+参考 DB-GPT `VisChart` / `VisDashboard` 协议，javacodeagent 定义了前端可渲染的图表规格：
+
+#### 单图（ChartSpec）
+
+SSE 事件格式：
+```json
+{"type":"chart_data","spec":{"displayType":"response_line_chart","title":"月销售趋势","data":[{"month":"2024-01","amount":1200000}]}}
+```
+
+#### 多图 Dashboard（DashboardSpec）
+
+```json
+{
+  "title": "销售综合看板",
+  "displayStrategy": "default",
+  "chartCount": 2,
+  "charts": [
+    {
+      "sql": "SELECT region, SUM(amount) FROM sales GROUP BY region",
+      "displayType": "response_bar_chart",
+      "title": "地区销售额",
+      "thought": "按地区汇总本月销售",
+      "data": [{"region": "华东", "amount": 1200000}],
+      "errMsg": null
+    },
+    {
+      "sql": "SELECT month, COUNT(*) FROM orders GROUP BY month",
+      "displayType": "response_line_chart",
+      "title": "月订单量趋势",
+      "thought": "过去12个月订单量变化",
+      "data": [{"month": "2024-01", "count": 3240}],
+      "errMsg": null
+    }
+  ]
+}
+```
+
+> 参考 DB-GPT `VisDashboard`：单图 SQL 执行失败时，`errMsg` 字段填写错误原因，其余图表正常渲染，不阻断整个 Dashboard。`DashboardGenerator` 以 `Flux.flatMap(concurrency=4)` 并行执行各图表 SQL，与 Prompt 中约定的 2-4 图表并发上限一致。
+
+---
+
+### Excel/CSV 分析路径
+
+参考 DB-GPT `Excel2TableAgent`（DuckDB 路径），javacodeagent 使用 H2 内存表实现等价方案：
+
+```
+Excel/CSV 上传
+    │
+    ▼ ExcelDataSourceConnector.importFile()（@Transactional，中途失败整体回滚）
+    ├── 读取列名 + 样例行（3行）
+    ├── 检测 CJK 字符 → translateChineseHeaders()
+    │       批量 LLM 翻译为英文 snake_case；失败降级为 col_0, col_1, ...
+    ├── H2 建表："tbl_<uuid12>"（带双引号，防大小写冲突）
+    └── 批量写入所有行数据
+            │
+            ▼ ExcelAnalysisController.queryExcel()
+    标准 NL2SQL 管道（SqlValidator + SqlExecutor + InsightGenerator 完全复用）
+```
+
+**DB-GPT 对比设计启示：**
+- DB-GPT 路径 A（`Excel2TableAgent`）：Excel → DuckDB → 标准 NL2SQL 分析
+- DB-GPT 路径 B（`chat_excel`）：`excel_reader.read_from_df()` + DuckDB 内存注册 + 直接 SQL 查询
+- javacodeagent：Apache POI / Commons CSV + H2 内存表，复用现有 JDBC 管道，无需引入 DuckDB 依赖
+
+---
+
+### 多 Agent 协作模式
+
+参考 DB-GPT `ConversableAgent` 链式协作（MetricInfoRetriever → AnomalyDetector → VolatilityAnalysis → Report），javacodeagent 使用 Java 21 虚拟线程并行实现：
+
+```
+DataAgentPipeline.analyze()    ← NL2SQL 管道获取原始指标数据
+        │
+        ▼ DataAnalysisAgent（Executors.newVirtualThreadPerTaskExecutor()）
+        │
+    ┌───┴──── 并行（Virtual Thread）────┐
+    │                                  │
+    ▼                                  ▼
+AnomalyDetectorAgent           VolatilityAnalysisAgent
+  目标：检测统计异常              目标：计算 CV/趋势/极值
+  约束：>3σ 离群值/空值/          约束：从候选维度中选最相关
+        分布异常                        维度做贡献率分析
+  输出：JSON 数组                  输出：JSON 对象
+    │                                  │
+    └──────────── 合并 ────────────────┘
+                    │
+                    ▼ ReportGenerationAgent（串行，等待两路完成）
+              整合两路结论 → 5 节 Markdown 综合报告
+              （执行摘要/关键发现/异常详情/波动趋势/行动建议）
+```
+
+**各 Agent Prompt 要点（参考 DB-GPT `ProfileConfig` 设计模式）：**
+
+| Agent | 核心目标 | 输出格式 | 重试机制 |
+|-------|---------|---------|---------|
+| `AnomalyDetectorAgent` | 检测 >3σ 离群值、空值列、值域异常 | JSON 数组（贪婪 `\\[[\\s\\S]*]` 正则提取） | 无（单次调用） |
+| `VolatilityAnalysisAgent` | 计算 CV、趋势方向、极值、波动区间 | JSON 对象（`indexOf/lastIndexOf` 贪婪提取） | 无（单次调用） |
+| `ReportGenerationAgent` | 整合两路结论，面向业务用户 | Markdown（5 节结构化报告） | 无（单次调用） |
+
+> **线程安全注意**：Agent 返回值通过 `CompletableFuture.get()` 收集后传入 `ReportGenerationAgent`，`DataAnalysisAgent` 的入参 `metrics` Map 使用 `new HashMap<>`（而非 `Map.of()`），以支持 LLM 返回 null 值时安全 `put()`。
+
+---
+
+### AWEL 流水线（设计参考）
+
+DB-GPT 的 AWEL DAG 是 `DataAgentPipeline` 的设计原型，以下对照关系展示了 Python 算子到 Java Mono 链的映射：
+
+| DB-GPT AWEL 算子 | javacodeagent 等价实现 |
+|-----------------|----------------------|
+| `SchemaLinkingOperator`（RAG 向量检索） | `SchemaRetriever.retrieve()`（关键词匹配，RAG 待实现） |
+| `SqlGenOperator`（LLM → SQL 字符串） | `Nl2SqlService.generateSql()` |
+| `SqlExecOperator`（→ DataFrame） | `SqlExecutor.execute()` + `DataQueryResult` |
+| `ChartDrawOperator`（GPT-Vis 渲染） | `ChartSpec.from()` + SSE 事件推送 |
+| `HODatasourceDashboardOperator`（多图） | `DashboardGenerator.generate()` |
+| `JoinOperator`（合并上下文） | Reactor `flatMap` 链中隐式传递 schema 字符串 |
+
+**完整 AWEL DAG 示意（参考原始流水线）：**
+```
+HttpTrigger（POST /query）
+    │
+    ▼
+SchemaLinkingOperator（RAG → 相关 Schema）
+    │
+    └──► JoinOperator（question + schema → prompt）
+                │
+                ▼
+         NL2SQL Operator（LLM → SQL + display_type）
+                │
+                ▼
+         SqlExecOperator（执行 → DataFrame/DataQueryResult）
+                │
+                ▼
+         ChartDrawOperator / InsightGenerator（可视化 + 洞察）
+```
+
+---
+
+### Data Agent 关键设计决策
+
+**为何先检索 Schema 再生成 SQL？**  
+表数量超过 30 张后，全量 Schema 超出 LLM 上下文窗口（8K-32K token）。`SchemaRetriever` 仅取相关 3-5 张表的 DDL + 样例行，token 消耗减少约 80%，SQL 准确率反而更高（上下文更聚焦）。关键词匹配适用于表数 <50 的场景；更多时切换 Embedding 向量检索（LangChain4j `EmbeddingStore<TextSegment>`，开发环境 InMemory / 生产 PostgreSQL 环境 PgVector）。
+
+**为何 `display_type` 由 LLM 选择而非规则？**  
+同一份数据既可用折线图（看趋势）也可用饼图（看占比），规则无法覆盖所有语义意图。Prompt 给出 8 种图表的语义说明（line=趋势、pie=比例、scatter=异常检测…），引导 LLM 做有根据的选择。
+
+**为何 SQL 安全用 Prompt + 工具层双重防护？**  
+Prompt 约束（"只生成 SELECT"）不可靠——LLM 在边缘情况下可能生成 DML。`SqlValidator` 在执行前强制拦截，是不可绕过的安全边界；同时对字符串字面量豁免（`WHERE status = 'DELETE'` 不误报），并通过行/块注释剥离防止注释绕过堆叠查询。
+
+**为何流水线返回 `Mono<>` 而非同步？**  
+Schema 检索可能涉及向量库 HTTP 调用，SQL 执行是阻塞 JDBC（走 `boundedElastic`），LLM 调用是远程 HTTP。全链路 `Mono` 组合确保不阻塞 Netty IO 线程，支持并发多用户同时分析。
+
+**为何 Excel 用 H2 内存表而非直接对 DataFrame 提问？**  
+直接对 DataFrame 提问（PandasAI 模式）限制 LLM 只能生成 Python 代码，难以控制安全边界。将 Excel 导入 H2 后，可复用同一套 `SqlValidator + SqlExecutor` 管道，安全拦截和图表输出格式与标准 NL2SQL 完全一致，不引入额外代码路径。
+
+**为何 Dashboard 由 LLM 一次性规划多条 SQL？**  
+Dashboard 需从不同维度呈现数据（趋势 + 分布 + 排名），每个维度的聚合方式和时间粒度不同。LLM 一次性规划比规则拼接更灵活，且能理解图表间的语义关联（"总量折线 + 构成饼图"）。`Flux.flatMap(concurrency=4)` 并行执行，单图失败以 `errMsg` 隔离，不阻断其余图表渲染。
+
+**为何多 Agent 协作用虚拟线程而非 WebFlux？**  
+`AnomalyDetectorAgent` 和 `VolatilityAnalysisAgent` 各自调用 LLM（阻塞 HTTP），需要等待两路结果才能交给 `ReportGenerationAgent`。Java 21 虚拟线程 `CompletableFuture.allOf` 表达 fan-out/gather 语义比 `Mono.zip` 更简洁，且在 `Schedulers.boundedElastic()` 线程中调用 `.block()` 是安全的。
+
+**为何 `Nl2SqlResult.sql` 要做非空检查？**  
+LLM 可以成功响应（HTTP 200）但在 JSON 中返回 `"sql":""` 空字符串。若直接传给 `SqlExecutor` 则产生模糊的 JDBC 错误（`StatementCallback; bad SQL grammar`），对排查毫无帮助。`Nl2SqlService.generateSqlFromLlm()` 在 `map` 阶段检测空 SQL 并抛出 `IllegalStateException("LLM generated empty SQL")`，让错误在来源处就可被定位。
+
+---
+
+### 多数据源管理
+
+`DataSourceManager` 维护运行时数据源注册表，支持同时连接多个异构数据库：
+
+```bash
+# 列出所有数据源
+GET /api/v1/data-agent/datasources
+
+# 动态注册外部数据源
+POST /api/v1/data-agent/datasources
+{
+  "id": "prod-mysql",
+  "url": "jdbc:mysql://host:3306/sales",
+  "username": "ro_user",
+  "password": "secret",
+  "dialect": "mysql",
+  "dbName": "sales",
+  "description": "生产 MySQL 销售数据库"
+}
+
+# 针对指定数据源查询
+POST /api/v1/data-agent/query
+{"question": "各地区月销售额", "dataSourceId": "prod-mysql"}
+
+# 获取指定数据源的 Schema
+GET /api/v1/data-agent/schema?dataSourceId=prod-mysql
+
+# 注销数据源（default 不能注销）
+DELETE /api/v1/data-agent/datasources/prod-mysql
+```
+
+Schema 向量索引（`memory.embedding.enabled=true` 时）也按 `dataSourceId` 分开维护，不同数据源的表向量互不干扰。表结构变更后调用 `POST /datasources/{id}/invalidate-schema-index` 触发重建。
+
+---
+
+### 指标体系集成
+
+仿 DB-GPT 归因分析链路（`MetricInfoRetriever → AnomalyDetector → VolatilityAnalysis → Report`）：
+
+```
+POST /api/v1/data-agent/metrics  # 注册指标定义
+{
+  "name":        "daily_order_count",
+  "displayName": "日订单量",
+  "table":       "orders",
+  "valueColumn": "order_id",
+  "timeColumn":  "created_at",
+  "aggregation": "COUNT",
+  "dimensions":  ["region", "product_type"],
+  "description": "每日新增订单数量"
+}
+
+POST /api/v1/data-agent/metric-analysis  # 完整归因分析
+{"metricName": "daily_order_count", "lookbackDays": 30}
+```
+
+**响应（MetricAnalysisReport）：**
+```json
+{
+  "metricName":    "daily_order_count",
+  "displayName":   "日订单量",
+  "lookbackDays":  30,
+  "currentValue":  1842,
+  "dimensions":    ["region", "product_type"],
+  "historicalData": [{"dt":"2024-12-01","value":1230}, ...],
+  "anomalies":     ["2024-12-25 value=3840 — 3.1× above 30d mean"],
+  "volatilityMetrics": {"cv": 0.28, "trend": "increasing", "peakValue": 3840},
+  "reportMarkdown": "## 执行摘要\n...",
+  "success": true
+}
+```
+
+**归因分析流水线：**
+```
+MetricInfoRetriever.getMetricInfo("daily_order_count", 30)
+    │  ① 查询当前聚合值（SELECT COUNT(order_id) FROM orders）
+    │  ② 查询 30 天历史趋势（GROUP BY DATE(created_at)）
+    ▼
+MetricAnalysisContext（当前值 + 历史趋势 + 候选维度）
+    │
+    ├── AnomalyDetectorAgent    ─┐  并行（Java 21 虚拟线程）
+    ├── VolatilityAnalysisAgent ─┘
+    │
+    └── ReportGenerationAgent → MetricAnalysisReport（Markdown 综合报告）
+```
+
+**与 `POST /multi-analysis` 的区别：**
+
+| 端点 | 输入 | 特点 |
+|------|------|------|
+| `/multi-analysis` | 自然语言问题 | 先 NL2SQL 再分析，灵活但无法预定义指标语义 |
+| `/metric-analysis` | 预定义指标名 | 指标定义完整（聚合函数/时间列/维度），SQL 精确，适合持续监控场景 |
+
+---
+
+### 慢查询日志 + Micrometer 指标
+
+```yaml
+data-agent:
+  slow-query-threshold-ms: 2000  # 超过 2s 记录 WARN 日志
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+```
+
+```bash
+# 查询 SQL 执行耗时 P99/P95/AVG
+GET /actuator/metrics/data_agent_query_duration_seconds
+
+# 按状态（success/error）分别查看
+GET /actuator/metrics/data_agent_query_duration_seconds?tag=status:success
+```
+
+慢查询 WARN 日志格式：
+```
+[SLOW QUERY] 3421ms (threshold=2000ms): SELECT region, month, SUM(amount) FROM sales GROUP BY ...
+```
+
+---
+
 ## 关键设计决策
 
 **为何使用 WebFlux？**  
@@ -1342,6 +1856,12 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 
 **为何 `userId` 依赖请求头而非 Spring Security？**  
 项目使用 WebFlux，未引入 Spring Security；`X-User-Id` 请求头方案实现简单且与认证（API Key）解耦，方便未来替换为 JWT claim 提取，无需修改下游代码。
+
+**为何向量存储改用 LangChain4j `EmbeddingStore`（InMemory + PgVector）而非继续手写？**  
+手写的 `MemoryEmbeddingStore`/`SchemaRetriever` 向量索引本质是同一套逻辑重复了两遍（双层 `ConcurrentHashMap` + 手写余弦相似度），且是纯内存实现：记忆/Schema 索引量上去后是 O(n) 线性扫描，重启后向量全部丢失、需要后台重新计算。LangChain4j 的 `EmbeddingStore<TextSegment>` 提供统一抽象，开发环境用 `InMemoryEmbeddingStore` 保持零依赖（行为等价于旧实现），生产 PostgreSQL profile 下换成 `PgVectorEmbeddingStore` 即获得真正的持久化和向量索引，不用自己再实现一遍。代价是 `langchain4j-pgvector` 目前是 beta 版本，API 可能变动。
+
+**为何 MCP 客户端改用 `langchain4j-mcp`？**  
+手写的 `HttpMcpClient` 只实现了最基本的 JSON-RPC over HTTP（`.block()` 同步调用），不支持工具列表变更通知、连接断开重连、stdio transport（本地进程型 MCP Server）。这些协议边界情况 `langchain4j-mcp` 的 `DefaultMcpClient` 已经处理好，没必要自己重新踩一遍坑。代价同样是该模块目前仍是 beta 版本。
 
 ---
 
@@ -1367,7 +1887,7 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 | MCP 协议客户端 | ✅ | ✅ |
 | API Key 认证（WebFilter） | ✅ | ✅ |
 | Thinking Mode（Anthropic） | ✅ | ✅ |
-| **向量记忆检索（embedding）** | ✅ | ❌ 待实现 |
+| **向量记忆检索（embedding）** | ✅ | ✅ |
 | **容器化（Dockerfile）** | ✅ | ✅ |
 | **生产级 JWT 认证** | ✅ | ✅ |
 | **数据分析智能体（NL2SQL 全流水线）** | ✅ | ✅ |
@@ -1377,6 +1897,10 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 | **多图 Dashboard** | ✅ | ✅ |
 | **历史 SQL 缓存（LRU+TTL）** | ✅ | ✅ |
 | **多 Agent 协作分析（归因/异常检测）** | ✅ | ✅ |
+| **多数据源管理（动态注册/切换）** | ✅ | ✅ |
+| **查询超时告警 + 慢查询日志（Micrometer）** | ✅ | ✅ |
+| **指标体系归因分析（MetricInfoRetriever）** | ✅ | ✅ |
+| **Schema Linking 向量检索** | ✅ | ✅ |
 
 ---
 
@@ -1427,10 +1951,19 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 
 - [x] **自迭代检视修复（第十一轮）** — 权限层：`PermissionService.checkPermissionLevel()` 扩充 `READ_ONLY` 涵盖 `DATABASE_READ`，`SAFE` 涵盖 `DATABASE_READ` + `GIT_OPERATION`（原 `SAFE` 级别只允许文件读写，导致 `SqlQueryTool`/`GitTool` 在默认 SAFE 权限下被拒绝，需手动配置 `ALL` 才能使用）；`application.yml auto-approve` 移除无效的 `glob`/`grep` 枚举值（这两个字符串在 `PermissionType` 中不存在，`valueOf()` 抛 `IllegalArgumentException` 被 catch 静默忽略，配置行实际无效，改为 `database-read`，与 `SqlQueryTool` 权限对齐）；`ToolManager.executeToolCall()` pre-hook 创建时 `toolCall.getInput()` 可能为 null 导致 `Map.of()` NPE，改为 null-safe 取值（`inputForHook = input != null ? input : Map.of()`）；`Nl2SqlService.generateSqlFromLlm()` 在 LLM 响应 map 阶段增加空 SQL 检测（`sql == null || isBlank()`），使上层能以 `IllegalStateException` 形式捕获并返回可读错误，而非在 `SqlExecutor` 中产生模糊的 JDBC 错误；`InsightGenerator.generate()` 补充 `switchIfEmpty` 分支（filter 过滤空 LLM 内容后 Mono 为空时降级到 `thought` 字段），防止调用方因 empty Mono 引发 NPE；`DataAgentPipeline.analyze()` 错误报告补充 `question` 字段（原 `error(message)` 不含 question，前端无法关联到原始请求）；`DataAgentPipeline.analyzeStream()` 补充入口非空校验（question 为 null 或空时立即返回 error/done SSE，防止后续 NullPointerException 传播到 SSE 流中导致无 done 事件）；`VolatilityAnalysisAgent.parseJsonObject()` 失败兜底由不可变 `Map.of("trend","insufficient_data")` 改为 `new HashMap<>()`，防止调用方 `metrics.put(...)` 抛出 `UnsupportedOperationException`
 
+- [x] **自迭代检视修复（第十二轮）** — **编译错误修复**：`MetricInfoRetriever.getMetricInfo()` 中 `ctx.currentResult()` 改为 `ctx.getCurrentResult()`（`MetricAnalysisContext` 是 `@Data` 类，Lombok 生成的是 `getXxx()` 方法而非记录组件访问器）；`MetricAnalysisContext.toPromptText()` 内全部 `currentResult.getRows()`/`getColumns()` 改为 `currentResult.rows()`/`columns()`（`DataQueryResult` 是 record，访问器不带 `get` 前缀）；`MetricAnalysisPipeline.toMapList()` / `extractCurrentValue()` 同步修正 `getRows()`→`rows()` / `getColumns()`→`columns()`。**安全修复**：`MetricInfoRetriever.register()` 新增注册时校验——`validateIdentifier()` 用正则 `^[A-Za-z_][A-Za-z0-9_]*$` 防止 table/column 字段含 SQL 注入字符，`validateAggregation()` 白名单（SUM/COUNT/AVG/MIN/MAX）防止任意函数注入；新增 `q(identifier)` 方法按方言正确引用标识符（MySQL 用反引号，PostgreSQL/H2 用双引号），`buildDefaultCurrentSql()`/`buildHistorySql()` 全部改用 `q()` 替换原来 MySQL 分支误用双引号的 Bug。**并发修复**：`SchemaRetriever` 将 `indexedDataSources: Set<String>` 替换为 `indexBuilt: ConcurrentHashMap<String, Object>`，`selectByEmbedding()` 中原先 `if (!contains) { build() }` 的 TOCTOU 竞争改为 `computeIfAbsent(id, k -> { buildIndexBlocking(); return BUILT; })`，保证同一数据源仅有一个线程执行索引构建。**运行时 Bug 修复**：`MetricAnalysisPipeline.parseVolatility()` 失败兜底由 `Map.of("trend","unknown")`（不可变）改为 `new HashMap<>(Map.of(...))`，防止下游 `put()` 抛 `UnsupportedOperationException`；`toMapList()` 删除多余的 `(Map<String,Object>) m` 强转（`m` 本身即 `Map<String,Object>` 不需要转型）。**功能 Bug 修复**：`DataAgentController.invalidateSchemaIndex()` 原来只检查数据源存在性但从不调用 `schemaRetriever.invalidateIndex()`，注入 `SchemaRetriever` 后实际执行索引清除；`unregisterDataSource()` 追加 `schemaRetriever.invalidateIndex(id)` 防止注销数据源后仍有陈旧向量残留内存；`DataAgentPipeline.generateSqlOnly()` 补充 question 非空校验（缺失时 NPE 到 schemaRetriever）；`DataAgentPipeline.generateDashboard()` 原始实现忽略 `request.dataSourceId` 始终使用默认连接器，改为 `resolveConnector(dsId)` + 传入 `DashboardGenerator.generate(question, connector, dsId)`；`DashboardGenerator.generate()` 新增接受 `DataSourceConnector`/`dataSourceId` 的重载，`executeDashboardSqls()` 改为接收 `targetConnector` 参数，执行 SQL 时使用目标数据源连接器而非注入的默认连接器。**参数校验**：`DataSourceManager.registerJdbc()` 增加 url 非空判断（防止 HikariCP 构建时产生模糊的 NPE）；`DataAgentController.registerDataSource()` 提前校验 url 字段。**代码清理**：移除 `DataSourceManager` 的无用 import `DataQueryResult`；移除 `MemoryService` 的无用 import `Collections`；移除 `DataAgentPipeline` / `DashboardGenerator` 中对同包类 `DataAgentConstants` 的跨包式 import。
+
+- [x] **自迭代检视修复（第十三轮）** — 本轮采用 README 设计声明 vs 源码实现的交叉核查方法（4 个并行核查维度：架构/端点/配置默认值、Hook/权限级联、上下文压缩/SQL安全/消息持久化、Plan状态机/认证过滤器/Dashboard并发/SQL缓存），共验证 63 个 API 端点与十余项行为声明。**安全修复（高优先级）**：`SqlValidator.validate()` 原实现先剥离注释（`BLOCK_COMMENT`/`LINE_COMMENT`）再剥离字符串字面量（`STRING_LITERAL`），导致字符串字面量内部的 `--`（如合法值 `'x--'`）被 `LINE_COMMENT` 正则误判为行注释起点，从该处开始把其后真实的 `; DROP TABLE ...` 一并当作注释吞掉，从而绕过分号堆叠查询检测与关键字黑名单——修复为先剥离字符串字面量、再剥离注释，彻底堵住此绕过路径；新增 `stringLiteralContainingDashDash_doesNotMaskStackedQuery` / `..._withoutStackedQuery_isAllowed` 两个回归测试覆盖该场景。**正确性修复**：`MessagePersistenceService.saveMessages()` 原来在 `@Transactional` 方法内部 catch 住批量保存过程中的异常并仅打印 `log.warn`，方法正常返回导致 Spring 事务代理认为方法成功从而提交事务——批次中已保存的部分消息被错误地持久化，与 README 宣称的"批次内要么全存要么全不存"原子性矛盾；修复为不再吞掉异常，让其向外传播以触发事务回滚，调用方可感知持久化失败并自行决定后续处理。**文档缺陷修复**：README 权限模型表格（`### 6. 权限模型`）多轮变更后未同步——`READ_ONLY`/`SAFE` 两行仍停留在第十一轮扩权前的旧描述（`READ_ONLY` 遗漏 `DATABASE_READ`，`SAFE` 遗漏 `DATABASE_READ`+`GIT_OPERATION`），现已按 `PermissionService.checkPermissionLevel()` 实际实现同步更新。**可用性修复**：`PlanService.executePlan()`（对应 `POST /plan/{id}/execute`）设计上是"仅推进步骤状态"的状态机批处理方法，不执行任何真实文件/Shell操作，但原先的成功响应文案（`"Marked COMPLETED by executePlan()"`）容易让 API 调用方误以为步骤真的被执行了；现已在 `PlanResult.output` 与每个 step 的 `result` 字段中显式标注"STATUS-ONLY COMPLETION / 未执行任何真实操作"，并在 README 端点列表中为该端点补充警示注释，引导需要真实执行效果的调用方改用 `next-step` + `complete-step`/`fail-step` 组合。**核查通过（无需改动）**：63 个文档化 REST 端点全部有对应 Controller 实现；`max-tool-call-depth` 默认值 50 与文档一致；7 种 Hook 类型均已定义且均被实际触发，PRE_* 阻塞/POST_*非阻塞语义正确；`ContextCompressor` 默认阈值/keepRecent/fallback 行为均与文档一致；JWT(@Order 1)/ApiKey(@Order 2) 过滤器协作逻辑正确；`DashboardGenerator` 并发度 4 + 单图表故障隔离正确；`SqlCacheService` LRU 500 + 1h TTL + key 归一化正确；Plan 5 阶段状态机（Explore→Draft→Review→Approve→Execute）与 README 架构图一致。
+- [x] **自迭代检视修复（第十四轮，本轮）** — 本轮针对 tools/、config/、core/data（Excel/数据源）、core/memory、core/skill 五大模块做安全与正确性专项审查。**安全修复（Critical）**：① `FilePathResolver.resolve()` 原实现仅用 `normalize()` 做词法层面的路径遍历防护，未解析符号链接——若沙箱目录内存在指向外部的符号链接（如 `workdir/link -> /etc/passwd`），`Read`/`Write`/`Edit`/`Grep`/`Glob`/`List` 等全部工具均可被诱导读写沙箱外文件；修复为额外调用 `toRealPath()` 解析真实路径再校验边界（文件不存在时退化为最近的已存在祖先目录判断），新增 `FilePathResolverTest` 覆盖符号链接逃逸/正常场景。② `MemoryService.sanitizeDirName()` 原正则保留点号，`userId=".."` 未被替换，`Paths.resolve("..")` 导致 `persistMemoryToFile`/`deleteMemoryFile` 逃逸到 memory 根目录之外造成任意路径写入/删除；修复为不再保留 `.`，整体替换为 `_`。③ `ExcelDataSourceConnector.getSampleRows()` 直接将客户端传入、未经校验的 `tableName` 拼接进 SQL（`getColumns()` 已用 `?` 参数化但 `getSampleRows()` 遗漏），构成标识符注入（可构造 `{"tableName":"x\" UNION SELECT ... --"}`）；修复为新增 `validateTableName()` 按内部生成规则（`^tbl_[a-f0-9]{12}$`）强校验，`getTableInfo`/`getSampleRows` 双重把关，新增 `getTableInfo_maliciousTableName_isRejectedNotExecuted` 回归测试。④ `SkillController.registerSkill()`/`ExternalSkillLoader.reload()` 允许任意 `execution.url` 且未做 SSRF 校验，`HttpDelegatedSkill.execute()` 会让服务端对该 URL 发起请求并回显响应，可被诱导访问云平台元数据端点（169.254.169.254）或内网服务窃取凭证；新增 `SkillUrlValidator.validateNotInternal()`（拒绝回环/内网/链路本地/多播地址及云元数据主机名），在 REST 注册入口与 yml 文件加载入口均接入校验。⑤ `config/WebConfig` 原 CORS 配置 `allowedOrigins("*")` 全放开，任意网站可跨域读取 JWT/API Key 保护的响应；新增 `CorsConfig`（`security.cors.allowed-origins`，默认空即不注册跨域映射，无通配符选项）。⑥ `application-postgres.yml` 密码默认回落到硬编码明文 `agentsecret`；改为 `${POSTGRES_PASSWORD}` 强制显式配置，与 `docker-compose-pg.yml` 的 `:?` 语义一致。**资源泄漏修复（High）**：⑦ `DataSourceManager.registerJdbc()`/`DataAgentConfig` 动态创建的 HikariCP 连接池在 `unregister()`/应用关闭时从未真正关闭（`JdbcDataSourceConnector.close()` 原来是空实现），反复注册/注销会持续泄漏数据库连接与维护线程；`JdbcDataSourceConnector` 新增 `ownedDataSource` 字段，仅当连接器持有自建连接池时 `close()` 才显式关闭，Spring 托管的默认数据源不受影响。⑧ `BashTool`/`GitTool` 原来只在超时分支销毁子进程，读取输出流异常或线程被中断等其他异常路径会让子进程成为孤儿进程持续运行；修复为 catch 块统一检查 `process.isAlive()` 并销毁；顺带移除 `BashTool` 中声明但从未被填充/读取的死字段 `runningProcesses`。**其他修复（Medium）**：⑨ `GrepTool.searchInFile()` 使用平台默认字符集读取文件（与包内其他工具的显式 UTF-8 不一致），非 UTF-8 默认 locale 环境下会抛 `MalformedInputException` 或产生乱码；改为显式 `StandardCharsets.UTF_8`。⑩ `EditTool`/`WriteTool` 未校验 `old_string`/`new_string`/`content` 是否为 null，缺失时抛出令人困惑的 `"...null"` 错误信息；改为提前返回明确的字段必填错误。⑪ `POST /api/v1/memory` 请求体缺失 `type` 字段时，`MemoryService.persistMemoryToFile()` 对 `entry.getType().name()` 直接 NPE 且未被捕获，冒泡为 500；在 Controller 入口补充非空校验，返回可读的 400。⑫ Excel 上传接口无文件大小上限，且原实现用 `System.arraycopy` 手工拼接每个分片（O(n²) 拷贝），大文件上传会导致内存/CPU 被拖垮；改为 `DataBufferUtils.join` + 累计字节数提前中断，`application.yml` 新增 `spring.webflux.multipart.max-in-memory-size: 10MB`，`DataAgentConstants.EXCEL_UPLOAD_MAX_BYTES` 显式限制单文件 20MB。⑬ `SkillController.executeSkill()` 原来返回同步 `ResponseEntity`，但内部 `HttpDelegatedSkill.execute()` 对 WebClient 的 `Mono` 调用了 `.block()`——在 WebFlux 的 Netty event-loop 线程上直接阻塞，轻则抛出被吞掉的模糊错误，重则并发请求耗尽 event-loop 线程池拖慢全站响应；改为返回 `Mono<ResponseEntity<SkillResult>>` 并显式 `subscribeOn(Schedulers.boundedElastic())`。**并发/配置审查通过（无需改动）**：`AgentManager` 并行虚拟线程编排（Anomaly+Volatility→Report）无共享可变状态，`agentExecutor` 正确 `@PreDestroy` 关闭；`LLMConfig`/`AgentConfig`/`PermissionConfig` 等配置类无泄漏密钥、无遗留调试开关；JPA 实体/仓储无明显 N+1 模式。
+- [x] **向量记忆检索** — `EmbeddingClient` 接口 + `OpenAICompatibleEmbeddingClient`（调 `/v1/embeddings`，兼容 OpenAI / Ollama / Qwen / DeepSeek 等）；`MemoryEmbeddingStore` 双层 `ConcurrentHashMap` 内存存储 + 余弦相似度排序（无需外部向量库）；`@ConditionalOnProperty` 条件注册，关闭时零开销；`GET /memory/{userId}/search?mode=semantic` 新参数；失败/未启用自动降级关键词搜索；启动时后台批量补齐 embedding；`MemoryEmbeddingStoreTest` 单元测试覆盖（余弦计算/阈值过滤/多用户隔离/零向量防护）
+- [x] **Schema Linking 向量检索** — `SchemaRetriever` 复用 `EmbeddingClient`，为表名+列名建立向量索引（`ConcurrentHashMap<dsId::tableName, float[]>`），按余弦相似度选 top-K 表，降级为关键词匹配；首次 `retrieve()` 同步建索引，后续走缓存；`invalidateIndex(dsId)` 支持热刷新；相似度阈值 0.25（短表名语义更离散）；多数据源各自独立索引。
+- [x] **查询超时告警 + 慢查询日志** — `SqlExecutor` 通过构造器注入 `MeterRegistry`（`@Autowired(required=false)`，无 Actuator 时零开销）；`Timer.builder("data_agent_query_duration_seconds").tag("status",...)` 记录全量查询耗时；执行时间超过 `data-agent.slow-query-threshold-ms`（默认 2000ms）时打 WARN 日志（含 SQL 摘要前 120 字符）；通过 `GET /actuator/metrics/data_agent_query_duration_seconds` 可读；`application.yml` 开放 `metrics,prometheus` Actuator 端点。
+- [x] **多数据源管理** — `DataSourceManager` 维护 `ConcurrentHashMap<id, DataSourceConnector>`；`registerJdbc(id, url, ...)` 内部创建 HikariCP 连接池；`DataAgentPipeline.resolveConnector(dsId)` 按请求路由连接器；`SchemaRetriever.retrieve(q, connector, dsId)` 接受显式连接器参数；`DataAgentConfig` 注册默认连接器；REST API：`GET /datasources` 列出 / `POST /datasources` 注册 / `DELETE /datasources/{id}` 注销；`GET /schema?dataSourceId=xxx` 查指定数据源 Schema。
+- [x] **指标体系集成** — `MetricInfoRetriever` 维护指标注册表（`MetricDefinition`: name/table/valueColumn/timeColumn/dimensions/currentValueSql/historySql）；按方言生成历史趋势 SQL（MySQL/PostgreSQL/H2）；`MetricAnalysisPipeline` 串联完整归因链路：`getMetricInfo()` → 并行（`AnomalyDetectorAgent` + `VolatilityAnalysisAgent`）→ `ReportGenerationAgent` → `MetricAnalysisReport`；REST API：`GET /metrics` 列出 / `POST /metrics` 注册 / `DELETE /metrics/{name}` 注销 / `POST /metric-analysis` 完整归因分析。
+
 ### 待实现
 
-- [ ] **向量记忆检索** — embedding 相似度替换关键词匹配（P1）
-- [ ] **Schema Linking 向量检索** — Embedding + ChromaDB/Milvus 替换关键词匹配（P2）
+- [ ] **LangChain4j 集成（向量存储 + MCP 客户端）** — 引入 `langchain4j-bom` + `langchain4j-core`/`langchain4j-open-ai`/`langchain4j-pgvector`（beta）/`langchain4j-mcp`（beta）。用 `OpenAiEmbeddingModel` 替代手写 `OpenAICompatibleEmbeddingClient`；用 `EmbeddingStore<TextSegment>`（开发环境 `InMemoryEmbeddingStore`，PostgreSQL profile 下 `PgVectorEmbeddingStore`）替代手写 `MemoryEmbeddingStore`（双层 `ConcurrentHashMap` + 手写余弦相似度），同时替换 `SchemaRetriever` 内重复的向量索引逻辑；用 `DefaultMcpClient` + `StreamableHttpMcpTransport` 替代手写 `HttpMcpClient`（JSON-RPC over 阻塞 `WebClient.block()`）。`Tool`/`ToolManager`/`EmbeddingConfig` 对外配置字段保持不变，`memory.embedding.enabled=false` / `mcp.enabled=false` 时行为不变。
 
 ---
 

@@ -316,13 +316,16 @@ public class PlanService {
             log.info("Plan {} - executing step {}: {}", planId, step.getOrder(), step.getDescription());
 
             try {
-                // 步骤实际执行体由外部 Agent 完成；此处代表"状态流转"完成
+                // 步骤实际执行体由外部 Agent 完成；此处代表"状态流转"完成，
+                // 并未执行任何真实的文件读写/Shell命令 —— 必须在结果里显式声明，
+                // 否则调用方会误以为 COMPLETED 代表真实工作已完成
                 step.setStatus(PlanStep.StepStatus.COMPLETED);
                 step.setFinishedAt(LocalDateTime.now());
-                step.setResult("Marked COMPLETED by executePlan()");
+                step.setResult("STATUS-ONLY COMPLETION (no actual execution performed) via executePlan()");
                 executedCount++;
                 output.append("Step ").append(step.getOrder()).append(": ")
-                    .append(step.getDescription()).append(" - COMPLETED\n");
+                    .append(step.getDescription())
+                    .append(" - COMPLETED (status-only, no real action executed)\n");
             } catch (Exception e) {
                 step.setStatus(PlanStep.StepStatus.FAILED);
                 step.setFinishedAt(LocalDateTime.now());
@@ -339,7 +342,9 @@ public class PlanService {
         persistToDatabase(plan);
 
         output.append("\nTotal executed: ").append(executedCount)
-            .append("/").append(plan.getSteps().size()).append(" steps");
+            .append("/").append(plan.getSteps().size()).append(" steps")
+            .append(" [WARNING: executePlan() only advances step status; it does not run any file/shell/tool action. ")
+            .append("Use POST /plan/{id}/next-step + complete-step/fail-step if real step execution is required.]");
 
         return PlanResult.builder()
             .plan(plan)

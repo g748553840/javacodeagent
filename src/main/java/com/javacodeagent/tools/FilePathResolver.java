@@ -3,6 +3,8 @@ package com.javacodeagent.tools;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -50,8 +52,46 @@ public class FilePathResolver {
                     "Path traversal detected: " + filePath + " escapes working directory " + normalizedWd
                 );
             }
+
+            // normalize() 只做词法层面的 ".."/"." 折叠，不会解析符号链接：
+            // 若 workdir 内存在指向 workdir 外部的符号链接（如 workdir/link -> /etc/passwd），
+            // normalizedPath 仍然以 normalizedWd 开头，上面的 startsWith 检查会被绕过。
+            // 因此需要额外解析真实路径（toRealPath）再做一次边界校验；
+            // 若文件尚不存在（如 Write 创建新文件），改为校验其最近一层已存在的祖先目录的真实路径。
+            Path realWd = resolveRealPath(normalizedWd);
+            Path realTarget = resolveNearestExistingRealPath(normalizedPath);
+
+            if (!realTarget.startsWith(realWd)) {
+                throw new SecurityException(
+                    "Path traversal detected via symlink: " + filePath + " resolves outside working directory " + normalizedWd
+                );
+            }
         }
 
         return path;
+    }
+
+    /** 解析路径的真实路径（跟随符号链接）；若解析失败则退化为原始规范化路径。 */
+    private Path resolveRealPath(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (IOException e) {
+            return path;
+        }
+    }
+
+    /**
+     * 解析目标路径本身（若存在）或其最近一层已存在祖先目录的真实路径。
+     * 用于在目标文件尚未创建时（如 Write 新文件）依然能校验符号链接逃逸。
+     */
+    private Path resolveNearestExistingRealPath(Path path) {
+        Path candidate = path;
+        while (candidate != null) {
+            if (Files.exists(candidate)) {
+                return resolveRealPath(candidate);
+            }
+            candidate = candidate.getParent();
+        }
+        return resolveRealPath(path);
     }
 }

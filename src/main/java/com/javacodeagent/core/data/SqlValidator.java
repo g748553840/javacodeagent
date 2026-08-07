@@ -54,10 +54,12 @@ public class SqlValidator {
         }
 
         // 分号检测：防止堆叠查询（PostgreSQL/H2 支持 multi-statement）
-        // 先剥离字符串字面量和注释再检测，避免合法的 ';' 字符串误报
-        String noComments = BLOCK_COMMENT.matcher(upper).replaceAll(" ");
-        noComments = LINE_COMMENT.matcher(noComments).replaceAll(" ");
-        String stripped = STRING_LITERAL.matcher(noComments).replaceAll(" ");
+        // 必须先剥离字符串字面量，再剥离注释：若先剥离注释，字符串字面量内部的 "--"
+        // （如 'x--'）会被 LINE_COMMENT 误判为注释起点，将其后的真实 SQL（如 "; DROP TABLE ..."）
+        // 一并当作注释吞掉，从而绕过分号/关键字检测
+        String noStrings = STRING_LITERAL.matcher(upper).replaceAll(" ");
+        String noBlockComments = BLOCK_COMMENT.matcher(noStrings).replaceAll(" ");
+        String stripped = LINE_COMMENT.matcher(noBlockComments).replaceAll(" ");
 
         if (stripped.contains(";")) {
             return SqlValidationResult.reject("Stacked queries (semicolons) are not allowed");

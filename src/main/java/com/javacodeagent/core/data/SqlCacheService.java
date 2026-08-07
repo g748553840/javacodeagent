@@ -50,12 +50,14 @@ public class SqlCacheService {
     };
 
     /**
-     * Look up a cached SQL result for the given question.
+     * Look up a cached SQL result for the given question, scoped to a datasource.
      *
+     * @param dataSourceId 数据源标识，纳入缓存 key 以避免跨数据源/租户串数据；
+     *                     null 时归一化为固定占位符，与显式传 "default" 等价
      * @return the cached {@link Nl2SqlResult} if present and not expired, otherwise empty
      */
-    public Optional<Nl2SqlResult> get(String question) {
-        String key = normalize(question);
+    public Optional<Nl2SqlResult> get(String dataSourceId, String question) {
+        String key = buildKey(dataSourceId, question);
         // Atomically check-and-remove expired entries via compute
         CacheEntry[] holder = new CacheEntry[1];
         store.computeIfPresent(key, (k, entry) -> {
@@ -76,10 +78,10 @@ public class SqlCacheService {
     }
 
     /**
-     * Store a SQL result in the cache for the given question.
+     * Store a SQL result in the cache for the given question, scoped to a datasource.
      */
-    public void put(String question, Nl2SqlResult result) {
-        String key = normalize(question);
+    public void put(String dataSourceId, String question, Nl2SqlResult result) {
+        String key = buildKey(dataSourceId, question);
         store.put(key, new CacheEntry(result, System.currentTimeMillis()));
         synchronized (lruOrder) { lruOrder.put(key, Boolean.TRUE); }
         log.debug("SQL cache stored for key: {} (cache size={})", key, store.size());
@@ -88,6 +90,19 @@ public class SqlCacheService {
     /** Return current number of entries in the cache. */
     public int size() {
         return store.size();
+    }
+
+    /**
+     * 构造缓存 key：{@code dataSourceId :: normalize(question)}。
+     *
+     * <p>此前 key 仅由归一化后的问题文本构成，未包含数据源标识：不同数据源（甚至不同租户/
+     * 权限边界）的相同或近似问法会命中同一条目，导致 A 数据源生成的 SQL/推理文本被回放给
+     * 针对 B 数据源提问的用户 —— 既泄露 A 的表结构信息，又可能被 B 的连接器错误执行。
+     * 显式将 dataSourceId 拼入 key 前缀，彻底隔离不同数据源的缓存条目。
+     */
+    private String buildKey(String dataSourceId, String question) {
+        String ds = (dataSourceId == null || dataSourceId.isBlank()) ? "default" : dataSourceId.trim().toLowerCase();
+        return ds + "::" + normalize(question);
     }
 
     /** Normalize the question to a stable cache key. */

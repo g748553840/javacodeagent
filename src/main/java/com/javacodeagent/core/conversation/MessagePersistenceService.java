@@ -36,15 +36,16 @@ public class MessagePersistenceService {
             .toList();
     }
 
-    /** 批量持久化一组消息（只保存 USER / ASSISTANT / TOOL_RESULT）。 */
+    /**
+     * 批量持久化一组消息（只保存 USER / ASSISTANT / TOOL_RESULT）。
+     * 异常必须向外抛出而非在此吞掉：@Transactional 只有在异常传播出方法时才会回滚，
+     * 否则方法正常返回会导致已保存的部分消息被提交，破坏"批次内要么全存要么全不存"的原子性。
+     * 调用方需要自行决定持久化失败时是否要中断整个对话流程。
+     */
     @Transactional
     public void saveMessages(String conversationId, List<Message> messages) {
-        try {
-            for (Message msg : messages) {
-                repository.save(toEntity(conversationId, msg));
-            }
-        } catch (Exception e) {
-            log.warn("Failed to persist messages for conv {}: {}", conversationId, e.getMessage());
+        for (Message msg : messages) {
+            repository.save(toEntity(conversationId, msg));
         }
     }
 

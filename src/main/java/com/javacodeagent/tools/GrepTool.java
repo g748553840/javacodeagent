@@ -137,7 +137,7 @@ public class GrepTool implements Tool {
     }
 
     private void searchInFile(Path file, Pattern pattern, StringBuilder result) {
-        try (Stream<String> lines = Files.lines(file)) {
+        try (Stream<String> lines = Files.lines(file, java.nio.charset.StandardCharsets.UTF_8)) {
             // 带实际行号的匹配（indexed stream → 行号从 1 开始）
             final int[] lineNum = {0};
             List<String> matchedLines = new ArrayList<>();

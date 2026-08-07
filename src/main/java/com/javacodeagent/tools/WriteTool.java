@@ -72,6 +72,10 @@ public class WriteTool implements Tool {
         String filePath = (String) input.get("file_path");
         String content = (String) input.get("content");
 
+        if (content == null) {
+            return ToolExecutionResult.error("content is required");
+        }
+
         try {
             Path path = pathResolver.resolve(filePath, context.getWorkingDirectory());
 

@@ -19,6 +19,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 import java.util.Map;
@@ -78,6 +80,12 @@ public class SkillController {
             return ResponseEntity.badRequest()
                 .body(Map.of("success", false, "error", "execution.url is required"));
         }
+        try {
+            com.javacodeagent.core.skill.SkillUrlValidator.validateNotInternal(descriptor.getExecution().getUrl());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest()
+                .body(Map.of("success", false, "error", e.getMessage()));
+        }
 
         HttpDelegatedSkill skill = new HttpDelegatedSkill(descriptor, webClientBuilder);
         skillManager.registerSkill(skill);
@@ -110,9 +118,19 @@ public class SkillController {
         return ResponseEntity.ok(Map.of("success", true, "message", "Skill unregistered: " + name));
     }
 
-    /** 直接执行指定 Skill（管理调试用） */
+    /** 直接执行指定 Skill（管理调试用）
+     *
+     * <p>{@link HttpDelegatedSkill#execute} 内部对 WebClient 的 Mono 调用了
+     * {@code .block()}（阻塞调用）；WebFlux 控制器方法若直接返回同步 {@code ResponseEntity}，
+     * Spring 会在 Netty event-loop 线程上调用本方法，而 event-loop 线程不允许阻塞——
+     * 轻则每次调用报 "block()/blockFirst()/blockLast() are blocked" 异常（被内部 catch
+     * 吞掉，返回误导性的 "HTTP call failed"），重则并发调用会占满本就有限的
+     * event-loop 线程池，拖慢其他与此无关的请求。
+     * 改为返回 {@code Mono} 并显式 {@code subscribeOn(boundedElastic())}，
+     * 让阻塞调用发生在专用的弹性线程池而非 IO 事件循环线程上。
+     */
     @PostMapping("/{name}/execute")
-    public ResponseEntity<SkillResult> executeSkill(
+    public Mono<ResponseEntity<SkillResult>> executeSkill(
             @PathVariable String name,
             @RequestBody(required = false) Map<String, Object> parameters,
             @RequestHeader(value = "X-User-Id", defaultValue = "anonymous") String userId) {
@@ -121,9 +139,10 @@ public class SkillController {
             .userId(userId)
             .build();
         SkillInput input = new SkillInput(name, parameters != null ? parameters : Map.of());
-        SkillResult result = skillManager.executeSkill(name, input, ctx);
-        return result.isSuccess()
-            ? ResponseEntity.ok(result)
-            : ResponseEntity.badRequest().body(result);
+        return Mono.fromCallable(() -> skillManager.executeSkill(name, input, ctx))
+            .subscribeOn(Schedulers.boundedElastic())
+            .map(result -> result.isSuccess()
+                ? ResponseEntity.ok(result)
+                : ResponseEntity.badRequest().body(result));
     }
 }

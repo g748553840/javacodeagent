@@ -73,6 +73,12 @@ public class ExternalSkillLoader {
                             log.warn("Skill [{}] missing execution.url, skipping: {}", desc.getName(), file);
                             return;
                         }
+                        try {
+                            SkillUrlValidator.validateNotInternal(desc.getExecution().getUrl());
+                        } catch (IllegalArgumentException e) {
+                            log.warn("Skill [{}] rejected (unsafe execution.url): {}", desc.getName(), e.getMessage());
+                            return;
+                        }
 
                         HttpDelegatedSkill skill = new HttpDelegatedSkill(desc, webClientBuilder);
                         skillManager.registerSkill(skill);

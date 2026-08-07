@@ -134,6 +134,7 @@ public class GitTool implements Tool {
     }
 
     private ToolExecutionResult runGit(String command, String args, Path workingDir) {
+        Process process = null;
         try {
             List<String> cmdLine = buildCommandLine(command, args);
             log.info("Running git command: {}", cmdLine);
@@ -144,7 +145,7 @@ public class GitTool implements Tool {
                 pb.directory(workingDir.toFile());
             }
 
-            Process process = pb.start();
+            process = pb.start();
 
             StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
@@ -186,6 +187,11 @@ public class GitTool implements Tool {
         } catch (IllegalArgumentException e) {
             return ToolExecutionResult.error("Invalid git args: " + e.getMessage());
         } catch (Exception e) {
+            // 无论异常发生在启动、读取输出还是 waitFor 阶段（包括被中断），
+            // 只要进程已经启动就必须显式销毁，否则子进程会成为孤儿进程继续运行
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
             log.error("Git command failed: git {} {}", command, args, e);
             return ToolExecutionResult.error("Git execution error: " + e.getMessage());
         }

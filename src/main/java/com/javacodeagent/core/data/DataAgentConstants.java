@@ -41,5 +41,8 @@ public final class DataAgentConstants {
     /** SQL 校验错误提示中显示的最大 SQL 前缀长度。 */
     public static final int SQL_ERROR_EXCERPT_LENGTH = 30;
 
+    /** Excel/CSV 上传文件大小上限（字节），超出直接拒绝，防止内存耗尽型 DoS。 */
+    public static final long EXCEL_UPLOAD_MAX_BYTES = 20L * 1024 * 1024;
+
     private DataAgentConstants() {}
 }

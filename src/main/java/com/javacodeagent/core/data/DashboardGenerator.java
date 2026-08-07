@@ -1,6 +1,5 @@
 package com.javacodeagent.core.data;
 
-import com.javacodeagent.core.data.DataAgentConstants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.javacodeagent.core.data.model.ChartSpec;
@@ -58,11 +57,23 @@ public class DashboardGenerator {
     private final ObjectMapper objectMapper;
 
     public Mono<DashboardSpec> generate(String question) {
-        return schemaRetriever.retrieve(question)
+        return generate(question, connector, "default");
+    }
+
+    /**
+     * 为指定数据源生成多图 Dashboard。
+     *
+     * @param question     自然语言问题
+     * @param targetConnector 目标数据源连接器（支持多数据源路由）
+     * @param dataSourceId    数据源标识（用于 Schema 向量索引）
+     */
+    public Mono<DashboardSpec> generate(String question, DataSourceConnector targetConnector,
+                                        String dataSourceId) {
+        return schemaRetriever.retrieve(question, targetConnector, dataSourceId)
             .flatMap(schema -> {
                 String prompt = DASHBOARD_PROMPT
-                    .replace("{db_name}", connector.getDatabaseName())
-                    .replace("{dialect}", connector.getDialect())
+                    .replace("{db_name}", targetConnector.getDatabaseName())
+                    .replace("{dialect}", targetConnector.getDialect())
                     .replace("{schema}", schema)
                     .replace("{question}", question);
 
@@ -77,19 +88,25 @@ public class DashboardGenerator {
 
                 return llmClient.chat(ctx);
             })
-            .flatMap(resp -> executeDashboardSqls(resp.getContent(), question));
+            .flatMap(resp -> executeDashboardSqls(resp.getContent(), question, targetConnector));
     }
 
-    private Mono<DashboardSpec> executeDashboardSqls(String llmOutput, String question) {
+    private Mono<DashboardSpec> executeDashboardSqls(String llmOutput, String question,
+                                                      DataSourceConnector targetConnector) {
         List<JsonNode> chartNodes = new ArrayList<>();
+        // 记录解析失败原因：若为 null 且最终 charts 为空，说明 LLM 本身就没生成任何图表定义
+        // （不太可能但理论存在）；若非 null，则必须让调用方知道这是解析失败而非"正常无图表"
+        String parseError = null;
         try {
             String jsonArray = extractJsonArray(llmOutput);
             JsonNode charts = objectMapper.readTree(jsonArray);
             charts.forEach(chartNodes::add);
         } catch (Exception e) {
             log.error("Failed to parse dashboard LLM output: {}", llmOutput, e);
+            parseError = "Failed to parse LLM dashboard output: " + e.getMessage();
         }
 
+        final String finalParseError = parseError;
         return Flux.fromIterable(chartNodes)
             .flatMap(chart -> {
                 String sql = chart.path("sql").asText();
@@ -104,7 +121,7 @@ public class DashboardGenerator {
                         .errMsg(valid.reason()).build());
                 }
                 return Mono.fromCallable(() ->
-                    connector.executeQuery(sql, DataAgentConstants.DEFAULT_MAX_ROWS, DataAgentConstants.DEFAULT_QUERY_TIMEOUT)
+                    targetConnector.executeQuery(sql, DataAgentConstants.DEFAULT_MAX_ROWS, DataAgentConstants.DEFAULT_QUERY_TIMEOUT)
                 ).subscribeOn(Schedulers.boundedElastic())
                 .map(result -> ChartSpec.builder()
                     .sql(sql).displayType(displayType).title(title).thought(thought)
@@ -115,11 +132,14 @@ public class DashboardGenerator {
                         .sql(sql).displayType(displayType).title(title).thought(thought)
                         .errMsg(e.getMessage()).build());
                 });
-            }, DataAgentConstants.DASHBOARD_CHART_CONCURRENCY)  // 最多并行执行图表 SQL，与 LLM prompt 约定的 2-4 张一致
+            }, DataAgentConstants.DASHBOARD_CHART_CONCURRENCY)
             .collectList()
             .map(chartSpecs -> DashboardSpec.builder()
                 .title(question + DataAgentConstants.DASHBOARD_TITLE_SUFFIX)
                 .charts(chartSpecs)
+                // chartSpecs 为空且存在解析错误时显式标注，避免前端把它当成
+                // "LLM 判断该问题不需要图表" 的正常空结果
+                .errMsg(chartSpecs.isEmpty() ? finalParseError : null)
                 .build());
     }
 

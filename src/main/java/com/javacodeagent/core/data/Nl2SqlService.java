@@ -54,15 +54,17 @@ public class Nl2SqlService {
     private final ObjectMapper objectMapper;
     private final SqlCacheService sqlCacheService;
 
-    public Mono<Nl2SqlResult> generateSql(String question, String schema) {
-        // Cache check — identical normalized questions reuse prior SQL without an LLM call
-        return sqlCacheService.get(question)
+    public Mono<Nl2SqlResult> generateSql(String dataSourceId, String question, String schema) {
+        // Cache check — identical normalized questions reuse prior SQL without an LLM call.
+        // dataSourceId 必须纳入 key（见 SqlCacheService.buildKey 注释），否则不同数据源的
+        // 相同问法会互相串用彼此的 SQL/schema 推理内容，构成跨数据源数据泄露。
+        return sqlCacheService.get(dataSourceId, question)
             .map(cached -> {
                 log.debug("SQL cache hit for question: {}", question);
                 return Mono.just(cached);
             })
             .orElseGet(() -> generateSqlFromLlm(question, schema)
-                .doOnSuccess(result -> sqlCacheService.put(question, result)));
+                .doOnSuccess(result -> sqlCacheService.put(dataSourceId, question, result)));
     }
 
     private Mono<Nl2SqlResult> generateSqlFromLlm(String question, String schema) {
