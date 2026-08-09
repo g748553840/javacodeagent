@@ -33,7 +33,9 @@
 | **工具系统** | Read / Write / Edit / Glob / Grep / List / Bash / Git / SqlQuery，可插件化扩展 |
 | **权限模型** | READ_ONLY / SAFE / NORMAL / ALL 四级，工具自声明所需权限 |
 | **Hook 机制** | PRE/POST_TOOL_CALL 等 7 种钩子，支持拦截与审计 |
-| **上下文压缩** | 消息 > 40 条时调用 LLM 进行语义摘要，保留最近 10 条 |
+| **LLM 重试** | 瞬时故障（429/502/超时）指数退避重试；配额/认证类错误不重试；流式不重试 |
+| **上下文压缩** | token 预算触发 + 合法切点算法，保证不切开 `tool_use` / `tool_result` 配对 |
+| **工具中止与流式** | `AbortSignal` 协作式中止 + `ToolUpdateCallback` 增量输出（Bash 已接入） |
 | **记忆系统** | YAML frontmatter Markdown 文件 + MEMORY.md 索引，跨会话持久化，多用户目录分区 |
 | **向量记忆检索** | LangChain4j `OpenAiEmbeddingModel`（兼容 Ollama / Qwen / DeepSeek 等本地/云模型）+ `EmbeddingStore<TextSegment>`（开发用 InMemory，PostgreSQL profile 用 PgVector 持久化），`mode=semantic` 参数切换 |
 | **计划模式** | Explore → Draft → Review → Approve → Execute 五阶段安全执行 |
@@ -114,9 +116,22 @@ javacodeagent/
 │   │   ├── conversation/
 │   │   │   ├── ConversationManager.java   # Agentic Loop 核心，流式 SSE 事件编排
 │   │   │   ├── ContextBuilder.java        # 构建 ConversationContext
-│   │   │   ├── ContextCompressor.java     # LLM 语义压缩（Mono<ConversationContext>）
+│   │   │   ├── ContextCompressor.java     # LLM 语义压缩（token 预算 + 合法切点）
 │   │   │   ├── ResponseParser.java        # 解析 LLMResponse → tool calls + text
 │   │   │   └── MessagePersistenceService.java  # 消息 JPA 持久化（@Transactional）
+│   │   ├── piagent/                       # ── PIAgent.md 提炼的 Agent 构建能力 ──
+│   │   │   ├── retry/
+│   │   │   │   ├── RetryPolicy.java           # 指数退避策略（无 jitter）
+│   │   │   │   ├── RetryableErrorClassifier.java  # 正则黑白名单，黑名单优先
+│   │   │   │   └── RetryingLLMClient.java     # LLMClient 装饰器，流式不重试
+│   │   │   ├── compaction/
+│   │   │   │   ├── TokenEstimator.java        # 混合计数（usage 锚点 + CJK 感知启发式）
+│   │   │   │   ├── CutPointFinder.java        # 合法切点（不切开 tool_use/tool_result）
+│   │   │   │   └── CutPoint.java
+│   │   │   └── tool/
+│   │   │       ├── AbortSignal.java           # 协作式中止（onAbort 回调 + throwIfAborted）
+│   │   │       ├── AbortedException.java
+│   │   │       └── ToolUpdateCallback.java    # 工具流式进度回调
 │   │   ├── data/                          # ── Data Agent 数据分析模块 ──
 │   │   │   ├── DataAgentPipeline.java     # 主编排：Schema→NL2SQL→执行→洞察
 │   │   │   ├── DataSourceConnector.java   # 数据源抽象接口
@@ -909,23 +924,35 @@ ConversationManager.processMessageStream()
 
 ### 5. 上下文管理与压缩
 
+压缩支持两种切分策略，由 `context.compression.token-based` 切换：
+
+**token 模式（默认）** — 参照 pi 的压缩子系统设计：
+
 ```
-消息数 ≤ threshold（默认 40） → 直接传入，不压缩
-消息数 > threshold            → LLM 语义压缩：
-                                  把最早的 (总数 - keepRecent) 条消息发给 LLM 生成摘要
-                                  只保留摘要 + 最近 keepRecent（默认 10）条
-                                  失败时降级为字符串拼接摘要
-enabled: false                → 完全跳过压缩
+估算 token ≤ maxTokens - reserveTokens  → 不压缩
+估算 token 超出                          → 从尾部反向累加到 keepRecentTokens 预算
+                                           ↓
+                                     CutPointFinder 选择【合法切点】
+                                           ↓
+                                  切点之前 → LLM 摘要；切点之后 → 保留原文
+                                           ↓
+                                     失败降级为字符串拼接摘要
 ```
 
-压缩阈值和保留数量通过 `application.yml` 配置（由 `ContextCompressionConfig` 绑定，不再硬编码）：
+**为什么需要"合法切点"** — 这修复了一个真实缺陷：按消息条数切分会切在 `tool_use` 与 `tool_result` 之间，保留区留下没有对应调用的孤立工具结果。Anthropic API 会直接拒绝这种消息序列（`tool_result` 必须紧跟同批 `tool_use`）。`CutPointFinder` 保证切点两侧的工具调用配对完整；条数模式下同样会做这项修正。
+
+**token 估算是混合计数** — `TokenEstimator` 以最后一条响应的真实 provider usage 为锚点，只对其后新增的消息做启发式估算，误差不随对话增长累积。启发式区分 CJK 与拉丁字符（1.5 vs 4 字符/token）——按 `chars/4` 统一计算会严重低估中文内容，导致压缩触发过晚。
 
 ```yaml
 context:
   compression:
     enabled: true
-    threshold: 40
-    keep-recent: 10
+    threshold: 40              # 条数模式触发阈值
+    keep-recent: 10            # 条数模式保留条数
+    token-based: true          # 启用 token 预算 + 合法切点
+    max-tokens: 100000
+    reserve-tokens: 16384      # 为响应预留
+    keep-recent-tokens: 20000  # 尾部保留预算
 ```
 
 `compress()` 返回 `Mono<ConversationContext>`（异步 HTTP 调用，不阻塞 WebFlux 链）。
@@ -1268,9 +1295,55 @@ CompletableFuture<AgentResult> isolated = agentManager.launchIsolatedAgent(task,
 | 工具结果 | `role: user` + `tool_result` block | `role: tool` + `tool_call_id` |
 | stop_reason | `end_turn` / `tool_use` | `stop` / `tool_calls` |
 
+**失败表达（重要）：** 两个客户端都以 `LLMResponse.error=true` + `errorMessage` 显式表达失败，而非把异常转成 `content="Error: ..."` 的正常响应。后者会让失败文本被持久化进对话历史，模型在后续轮次会以为自己真的说过那句话。所有 `llmClient.chat()` 的调用点都应检查 `isError()`。
+
 ---
 
-### 14. MCP 协议支持（LangChain4j 集成）
+### 14. LLM 重试层
+
+`RetryingLLMClient` 是包在具体客户端外的装饰器，由 `LLMClientConfig` 按配置决定是否启用。
+
+```
+LLMClient (注入点)
+    └── RetryingLLMClient          ← agent.retry.enabled=true 时存在
+            └── AnthropicLLMClient / OpenAILLMClient
+```
+
+**判定优先级**（对齐 pi 的 `retryAssistantCall`）：
+
+```
+① 非错误响应              → 直接返回
+② 尝试次数已达上限        → 返回最后一次的错误响应
+③ 错误不可重试            → 立即返回，不浪费时间
+④ 否则                    → 指数退避后重试
+```
+
+**错误分类是文本正则匹配，不是错误码分类** —— 各家 provider 的错误码体系互不兼容，但错误文本里的关键词相当稳定。**判定顺序至关重要**：先排除不可重试模式，再匹配可重试模式。若顺序颠倒，`"429 rate limit exceeded — upgrade your billing plan"` 会被误判为可重试，对一个欠费账户反复重试毫无意义。
+
+| 类别 | 匹配内容 |
+|------|---------|
+| **不可重试** | `insufficient_quota` / `quota exceeded` / `billing` / `out of budget` / `usage limit reached` / `available balance` / `invalid_api_key` / `401` / `403` |
+| **可重试** | `overloaded` / `rate limit` / `429` `500` `502` `503` `504` `524` / `fetch failed` / `ECONNRESET` `ENOTFOUND` `EAI_AGAIN` / `socket hang up` / `timeout` / `stream ended before` / `ResourceExhausted` |
+
+未匹配任何已知模式的未知错误**保守地不重试** —— 可能是请求本身有问题（上下文超限、参数非法），重试只会重复失败。
+
+**退避是纯指数，无 jitter**：`baseDelay × 2^(attempt-1)`，即 1s → 2s → 4s。jitter 属于 provider SDK 层的职责（那一层还会优先采纳 `retry-after` 响应头）。
+
+**流式调用不重试** —— `chatStream` / `chatStreamFull` 已经向客户端 emit 了部分 token，重试会导致内容重复。要支持需在 SSE 层实现"丢弃已发送前缀"协议，复杂度远高于收益。
+
+```yaml
+agent:
+  retry:
+    enabled: true          # 默认开启（pi 默认关闭，此处有意偏离）
+    max-attempts: 3        # 总尝试次数，含首次调用
+    base-delay: 1s
+```
+
+> 与 pi 的偏离说明：pi 默认 `enabled=false`（重试是显式选择）。本项目面向长时间运行的 Agent 会话，一次瞬时 502 就中断整轮对话的代价远高于多等几秒，因此默认开启。
+
+---
+
+### 15. MCP 协议支持（LangChain4j 集成）
 
 ```
 mcp.servers: "fs=http://localhost:3001,gh=http://localhost:3002"
@@ -1291,7 +1364,7 @@ McpProxyTool("mcp__fs__read_file")
 
 使用 LangChain4j `langchain4j-mcp`（**beta**）的 `DefaultMcpClient` + `StreamableHttpMcpTransport` 替代手写 JSON-RPC over `WebClient`，获得标准的通知/重连/工具列表缓存处理。工具命名规范不变：`mcp__{server-name}__{tool-name}`，避免与内置工具冲突；`Tool` 接口与 `ToolManager` 注册逻辑均未改动。
 
-### 15. API 安全认证
+### 16. API 安全认证
 
 **认证层级（双模式，可共存）：**
 
@@ -1354,7 +1427,7 @@ ConversationRequest.userId → ContextBuilder → MemoryService / PermissionServ
 
 ---
 
-### 16. 多 Agent 协作分析架构
+### 17. 多 Agent 协作分析架构
 
 ```
 POST /api/v1/data-agent/multi-analysis
@@ -1389,7 +1462,7 @@ AnomalyDetector  VolatilityAnalysis    ← 各自独立 LLM 调用
 
 ---
 
-### 17. 历史 SQL 缓存
+### 18. 历史 SQL 缓存
 
 ```
 Nl2SqlService.generateSql(question, schema)
@@ -1961,7 +2034,24 @@ Anthropic 以 `content_block_start/delta/stop` 精确边界描述每个 block，
 - [x] **多数据源管理** — `DataSourceManager` 维护 `ConcurrentHashMap<id, DataSourceConnector>`；`registerJdbc(id, url, ...)` 内部创建 HikariCP 连接池；`DataAgentPipeline.resolveConnector(dsId)` 按请求路由连接器；`SchemaRetriever.retrieve(q, connector, dsId)` 接受显式连接器参数；`DataAgentConfig` 注册默认连接器；REST API：`GET /datasources` 列出 / `POST /datasources` 注册 / `DELETE /datasources/{id}` 注销；`GET /schema?dataSourceId=xxx` 查指定数据源 Schema。
 - [x] **指标体系集成** — `MetricInfoRetriever` 维护指标注册表（`MetricDefinition`: name/table/valueColumn/timeColumn/dimensions/currentValueSql/historySql）；按方言生成历史趋势 SQL（MySQL/PostgreSQL/H2）；`MetricAnalysisPipeline` 串联完整归因链路：`getMetricInfo()` → 并行（`AnomalyDetectorAgent` + `VolatilityAnalysisAgent`）→ `ReportGenerationAgent` → `MetricAnalysisReport`；REST API：`GET /metrics` 列出 / `POST /metrics` 注册 / `DELETE /metrics/{name}` 注销 / `POST /metric-analysis` 完整归因分析。
 
+- [x] **PIAgent 能力落地（第一批）** — 依据 `PIAgent.md` 第 13 章的渐进式落地策略（A 类改现有文件 / B 类新增独立包 / C 类暂缓），实施三项最高性价比改造：
+
+  **① LLM 失败显式化（根本性修复，前置条件）** — `AnthropicLLMClient` / `OpenAILLMClient` 原先在 `onErrorResume` 里把传输异常吞掉，转成 `content="Error: ..."` 的**正常响应**。这让上游完全无法区分"模型输出了以 Error 开头的文本"和"请求真的失败了"：失败文本会被 `persistNewMessages()` 持久化进对话历史，模型在后续每一轮都会看到自己"说过"这句话；重试逻辑也无从判定。现改为 `LLMResponse.ofError(...)` 显式标记 `error=true` + `errorMessage`，并新增 `describeError()` 把 HTTP 状态码与响应体拼进错误文本（分类器需要 `429`/`503` 这类信号，以及 body 里的 `insufficient_quota`）。同步修正 8 个 `llmClient.chat()` 调用点：`ConversationManager` 提前返回失败而不持久化；`Nl2SqlService` 抛出携带原因的异常（原先只会退化成笼统的 "empty response"）；`AnomalyDetectorAgent` / `VolatilityAnalysisAgent` / `ReportGenerationAgent` 显式回报失败（原先会把空 content 解析成"未发现异常"或 `trend=insufficient_data`，让调用方误以为数据健康）；`DashboardGenerator` 给出明确原因。`ContextCompressor` 的摘要调用也加了 `isError()` 检查。
+
+  **② LLM 重试层** — 新增 `piagent/retry/`：`RetryPolicy`（纯指数退避 `baseDelay × 2^(attempt-1)`，**无 jitter**——jitter 属 provider SDK 层职责）、`RetryableErrorClassifier`（正则黑白名单，**黑名单优先**：`"429 rate limit — upgrade your billing plan"` 必须判为不可重试，否则对欠费账户反复重试只会延后报错）、`RetryingLLMClient`（装饰器，由 `LLMClientConfig` 按 `agent.retry.enabled` 决定是否包裹）。判定优先级对齐 pi 的 `retryAssistantCall`：非错误→成功 / 次数耗尽→放弃 / 不可重试→立即返回 / 否则退避重试。**流式调用不重试**（已 emit 的 token 无法撤回）。与 pi 的有意偏离：pi 默认 `enabled=false`，本项目默认开启——长会话中一次瞬时 502 中断整轮对话的代价，远高于多等几秒。
+
+  **③ 压缩切点算法（修复真实缺陷）** — 新增 `piagent/compaction/`。原 `ContextCompressor` 按消息条数切 `subList(size - keepRecent)`，**会切在 `tool_use` 与 `tool_result` 之间**：摘要区留下"我要调用工具 X"，保留区留下没有对应调用的孤立工具结果——Anthropic API 会直接拒绝这种消息序列。`CutPointFinder` 从尾部反向累加 token 到 `keepRecentTokens` 预算，然后落到最近的**合法切点**（排除 `TOOL_RESULT`，且前一条不能是带 `toolCalls` 的 ASSISTANT），切点落在轮次中间时回溯到轮次起点。`TokenEstimator` 采用**混合计数**（以最后一条有效响应的真实 provider usage 为锚点，只对其后消息做启发式，误差不随对话增长累积），并区分 CJK 与拉丁字符（1.5 vs 4 字符/token）——统一按 `chars/4` 会严重低估中文，导致压缩触发过晚。条数模式下同样应用配对修正，`token-based=false` 可退回旧触发逻辑。
+
+  **④ 工具中止与流式** — 新增 `piagent/tool/`：`AbortSignal`（协作式中止，`onAbort` 注册清理 + `throwIfAborted` 检查点；`onAbort` 内含双重检查解决"注册与中止竞态"下回调丢失或重复执行的问题）、`ToolUpdateCallback`。`Tool` 接口新增三个 **default 方法**（`prepareArguments` / `getExecutionMode` / 四参数 `execute` 重载），默认委托给原方法，**其余 8 个工具零改动**。`ToolManager` 传递 signal 与 callback、应用 `prepareArguments`、并把中止识别为预期路径（`AbortedException` 沿 cause 链检测，不写 error 日志）。`BashTool` 实际接入：中止时销毁子进程、逐行推送输出。`ToolExecutionResult` 新增 `terminate`（对齐 pi 的「全部一致」原则）与 `details`（UI 用，不发 LLM）字段，均带默认值不影响既有调用。
+
+  **测试** — `RetryClassifierTest`（含黑名单优先级回归、退避无随机性验证）、`RetryingLLMClientTest`（重试次数、不可重试立即返回、流式不重试）、`CutPointFinderTest`（**核心回归：切点永不分离 tool_use/tool_result、保留区无孤立工具结果**、CJK 估算高于等长拉丁文本）、`AbortSignalTest`（50 轮并发注册/中止，验证每个回调恰好执行一次）、`AgenticLoopIntegrationTest` 新增失败响应不污染历史的用例。
+
 ### 待实现
+
+- [ ] **PIAgent 能力落地（第二批，C 类）** — `PIAgent.md` 第 13.0 节明确列为「依赖 Session 持久化，收益低于成本」的部分，**建议先验证第一批的收益再决定是否推进**：`AgentMessage` sealed 消息体系（需先迁移现有 `@Data` 可变 `Message`）、`Session` / `SessionEntry` / `LaneRecord` 事件溯源存储、`LaneStateReducer` 崩溃恢复、多车道（lane）与基于 lane 的子 Agent、`ConversationalAgent`（steer / followUp 双队列）、手动驱动 `peekAction` / `executeAction`。
+  > 注意：pi 自身的 `AgentHarness` 目前也是脚手架（所有行为方法抛 `HarnessNotImplemented`，测试文件名即 `agent-harness-scaffold.test.ts`），权威设计只存在于 231KB 的 `harness-v2.md` 规范文档中。照抄一个未经验证的设计风险很高。
+
+- [ ] **压缩子系统深化** — 第一批只落地了切点算法与混合 token 计数。pi 的完整设计还包含：`CompactionEntry` 自我完备检查点（内联 `retainedTail` 而非范围指针）、overflow 反应式触发路径（响应表明装不下 → 丢弃 → 压缩 → 重试，**每输入仅允许一次**的护栏防止无限循环）、split turn 双摘要（历史 `0.8 × reserve` + 轮次前缀 `0.5 × reserve`）、迭代压缩（`previousSummary` + 上次 `retainedTail` 虚拟 entry 参与切点计算）、`readFiles`/`modifiedFiles` 跨压缩累积、摘要请求隔离路由（`cacheRetention: none` + 新 sessionId，避免污染主会话 KV cache）。
 
 - [ ] **LangChain4j 集成（向量存储 + MCP 客户端）** — 引入 `langchain4j-bom` + `langchain4j-core`/`langchain4j-open-ai`/`langchain4j-pgvector`（beta）/`langchain4j-mcp`（beta）。用 `OpenAiEmbeddingModel` 替代手写 `OpenAICompatibleEmbeddingClient`；用 `EmbeddingStore<TextSegment>`（开发环境 `InMemoryEmbeddingStore`，PostgreSQL profile 下 `PgVectorEmbeddingStore`）替代手写 `MemoryEmbeddingStore`（双层 `ConcurrentHashMap` + 手写余弦相似度），同时替换 `SchemaRetriever` 内重复的向量索引逻辑；用 `DefaultMcpClient` + `StreamableHttpMcpTransport` 替代手写 `HttpMcpClient`（JSON-RPC over 阻塞 `WebClient.block()`）。`Tool`/`ToolManager`/`EmbeddingConfig` 对外配置字段保持不变，`memory.embedding.enabled=false` / `mcp.enabled=false` 时行为不变。
 

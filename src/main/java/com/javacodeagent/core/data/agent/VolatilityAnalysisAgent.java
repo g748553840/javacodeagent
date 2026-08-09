@@ -88,6 +88,15 @@ public class VolatilityAnalysisAgent implements Agent {
 
         try {
             var response = llmClient.chat(ctx).block();
+            if (response != null && response.isError()) {
+                // 失败时不要退化成 parseJsonObject 的空兜底 map——
+                // 那会让报告里出现看似合法的 trend=insufficient_data，掩盖真实故障。
+                log.warn("VolatilityAnalysis LLM call failed: {}", response.getErrorMessage());
+                return AgentResult.builder()
+                    .success(false)
+                    .error("LLM call failed: " + response.getErrorMessage())
+                    .build();
+            }
             String raw = (response != null) ? response.getContent() : null;
             Map<String, Object> metrics = parseJsonObject(raw);
             log.debug("VolatilityAnalysis: trend={} cv={}", metrics.get("trend"), metrics.get("cv"));

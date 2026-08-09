@@ -10,6 +10,9 @@ import com.javacodeagent.core.model.ToolCall;
 import com.javacodeagent.core.model.ToolDefinition;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.permission.PermissionService;
+import com.javacodeagent.piagent.tool.AbortSignal;
+import com.javacodeagent.piagent.tool.AbortedException;
+import com.javacodeagent.piagent.tool.ToolUpdateCallback;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -50,6 +53,19 @@ public class ToolManager {
     }
 
     public ToolExecutionResult executeToolCall(ToolCall toolCall, ExecutionContext context) {
+        return executeToolCall(toolCall, context, AbortSignal.NEVER, null);
+    }
+
+    /**
+     * 执行工具调用，支持中止与流式进度。
+     *
+     * @param signal   中止信号，传 {@link AbortSignal#NEVER} 表示不可中止
+     * @param onUpdate 流式进度回调，可为 null
+     */
+    public ToolExecutionResult executeToolCall(ToolCall toolCall,
+                                               ExecutionContext context,
+                                               AbortSignal signal,
+                                               ToolUpdateCallback onUpdate) {
         Tool tool = tools.get(toolCall.getName());
         if (tool == null) {
             return ToolExecutionResult.error("Tool not found: " + toolCall.getName());
@@ -86,34 +102,51 @@ public class ToolManager {
             }
         }
 
+        // 参数适配：让工具有机会把 LLM 传来的旧格式参数转成自己期望的形态
+        Map<String, Object> rawInput = toolCall.getInput() != null ? toolCall.getInput() : Map.of();
+        Map<String, Object> input;
+        try {
+            Map<String, Object> prepared = tool.prepareArguments(rawInput);
+            input = prepared != null ? prepared : rawInput;
+        } catch (Exception e) {
+            log.warn("prepareArguments failed for tool {}, using raw input", tool.getName(), e);
+            input = rawInput;
+        }
+
         // Pre-tool-call Hook
-        Map<String, Object> inputForHook = toolCall.getInput() != null ? toolCall.getInput() : Map.of();
         HookContext preHookContext = HookContext.builder()
             .type(HookType.PRE_TOOL_CALL)
             .userId(context.getUserId())
             .conversationId(context.getConversationId())
-            .data(Map.of("toolName", tool.getName(), "input", inputForHook))
+            .data(Map.of("toolName", tool.getName(), "input", input))
             .build();
         HookResult preHookResult = hookManager.triggerHook(HookType.PRE_TOOL_CALL, preHookContext);
         if (!preHookResult.shouldContinue()) {
             return ToolExecutionResult.error("Tool execution rejected by hook: " + preHookResult.getMessage());
         }
 
+        // 执行前先看一眼是否已被中止，避免做无用功
+        if (signal != null && signal.isAborted()) {
+            return ToolExecutionResult.error("Tool execution aborted before start");
+        }
+
         try {
-            Map<String, Object> input = toolCall.getInput();
+            AbortSignal effectiveSignal = signal != null ? signal : AbortSignal.NEVER;
+            Map<String, Object> effectiveInput = input;
             ToolExecutionResult result;
 
             if (tool.isBlocking()) {
                 // 阻塞工具（如 BashTool：process.waitFor()）必须在弹性线程池中运行，
                 // 不能占用 Netty IO 事件循环线程，否则在响应式管道中会导致死锁。
-                result = Mono.fromCallable(() -> tool.execute(input, context))
+                result = Mono.fromCallable(
+                        () -> tool.execute(effectiveInput, context, effectiveSignal, onUpdate))
                     .subscribeOn(Schedulers.boundedElastic())
                     .block();
                 if (result == null) {
                     result = ToolExecutionResult.error("Tool returned null result");
                 }
             } else {
-                result = tool.execute(input, context);
+                result = tool.execute(effectiveInput, context, effectiveSignal, onUpdate);
             }
 
             // Post-tool-call Hook
@@ -127,9 +160,28 @@ public class ToolManager {
 
             return result;
         } catch (Exception e) {
+            // 中止是预期路径而非故障，单独识别以免污染错误日志
+            if (isAbortion(e)) {
+                log.info("Tool {} aborted by signal", tool.getName());
+                return ToolExecutionResult.error("Tool execution aborted: " + tool.getName());
+            }
             log.error("Tool execution failed: {}", tool.getName(), e);
             return ToolExecutionResult.error("Tool execution failed: " + e.getMessage());
         }
+    }
+
+    /** 识别中止异常，包括被 Reactor 包装后藏在 cause 链里的情形。 */
+    private boolean isAbortion(Throwable e) {
+        Throwable cursor = e;
+        int depth = 0;
+        while (cursor != null && depth < 5) {
+            if (cursor instanceof AbortedException) {
+                return true;
+            }
+            cursor = cursor.getCause();
+            depth++;
+        }
+        return false;
     }
 
     /**

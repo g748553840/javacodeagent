@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -52,10 +53,10 @@ public class OpenAILLMClient implements LLMClient {
             .bodyToMono(String.class)
             .map(this::parseResponse)
             .onErrorResume(e -> {
+                // 标记为显式失败而非伪装成正常响应（同 AnthropicLLMClient）。
+                // 重试装饰器依赖 error 标记做分类判定。
                 log.error("OpenAI-compat LLM request failed", e);
-                return Mono.just(LLMResponse.builder()
-                    .content("Error: " + e.getMessage())
-                    .build());
+                return Mono.just(LLMResponse.ofError(describeError(e)));
             });
     }
 
@@ -425,5 +426,21 @@ public class OpenAILLMClient implements LLMClient {
     private void setCommonHeaders(HttpHeaders headers) {
         headers.set("Authorization", "Bearer " + config.getApiKey());
         headers.set("Content-Type", "application/json");
+    }
+
+    /**
+     * 构造供重试分类器判定的错误文本。
+     *
+     * <p>显式拼接 HTTP 状态码与响应体：状态码用于匹配 429/503 等模式，
+     * 响应体用于识别 provider 特有的 "insufficient_quota" 之类不可重试信号。
+     */
+    private String describeError(Throwable e) {
+        if (e instanceof WebClientResponseException wcre) {
+            String body = wcre.getResponseBodyAsString();
+            String base = wcre.getStatusCode().value() + " " + wcre.getStatusText();
+            return (body == null || body.isBlank()) ? base : base + " | " + body;
+        }
+        String msg = e.getMessage();
+        return msg != null ? msg : e.getClass().getSimpleName();
     }
 }

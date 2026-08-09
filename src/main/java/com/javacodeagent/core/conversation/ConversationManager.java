@@ -117,6 +117,18 @@ public class ConversationManager {
                 // subscribeOn 只影响订阅线程，不影响事件投递线程，此处必须用 publishOn。
                 .publishOn(Schedulers.boundedElastic())
                 .flatMap(response -> {
+                    // LLM 调用失败（重试耗尽或不可重试错误）时提前返回。
+                    // 不能让失败响应走下面的正常路径——那会把 "Error: ..." 当作
+                    // 助手回复持久化进对话历史，污染后续所有轮次的上下文。
+                    if (response.isError()) {
+                        log.warn("LLM call failed for conversation {}: {}",
+                            compressed.getConversationId(), response.getErrorMessage());
+                        return Mono.just(ConversationResponse.builder()
+                            .content("LLM request failed: " + response.getErrorMessage())
+                            .conversationId(compressed.getConversationId())
+                            .build());
+                    }
+
                     ParsedResponse parsed = responseParser.parse(response);
 
                     if (parsed.isHasToolCalls()) {

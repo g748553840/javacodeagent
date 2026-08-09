@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -53,10 +54,12 @@ public class AnthropicLLMClient implements LLMClient {
             .bodyToMono(String.class)
             .map(this::parseResponse)
             .onErrorResume(e -> {
+                // 标记为显式失败而非伪装成正常响应。
+                // 上游的重试装饰器依赖 error 标记与 errorMessage 做分类判定；
+                // 若继续把异常转成 content="Error: ..." 的成功响应，
+                // 重试层无法感知失败，错误也会被当作模型输出持久化进对话历史。
                 log.error("Anthropic LLM request failed", e);
-                return Mono.just(LLMResponse.builder()
-                    .content("Error: " + e.getMessage())
-                    .build());
+                return Mono.just(LLMResponse.ofError(describeError(e)));
             });
     }
 
@@ -84,6 +87,26 @@ public class AnthropicLLMClient implements LLMClient {
         if (config.isThinkingEnabled()) {
             headers.set("anthropic-beta", ANTHROPIC_BETA_THINKING);
         }
+    }
+
+    /**
+     * 构造供重试分类器判定的错误文本。
+     *
+     * <p>关键点是把 HTTP 状态码显式拼进文本——WebClient 的
+     * {@code WebClientResponseException.getMessage()} 形如 "429 Too Many Requests"
+     * 通常已含状态码，但部分实现只给短语；显式拼接可确保
+     * {@code RetryableErrorClassifier} 的 {@code \b(429|500|502|503|504|524)\b}
+     * 模式能稳定匹配。响应体也一并附上，因为 provider 的
+     * "insufficient_quota" 之类判定信息只存在于 body 中。
+     */
+    private String describeError(Throwable e) {
+        if (e instanceof WebClientResponseException wcre) {
+            String body = wcre.getResponseBodyAsString();
+            String base = wcre.getStatusCode().value() + " " + wcre.getStatusText();
+            return (body == null || body.isBlank()) ? base : base + " | " + body;
+        }
+        String msg = e.getMessage();
+        return msg != null ? msg : e.getClass().getSimpleName();
     }
 
     private Map<String, Object> buildRequestBody(ConversationContext context, boolean stream) {

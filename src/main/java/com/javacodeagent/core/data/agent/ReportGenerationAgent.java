@@ -88,6 +88,15 @@ public class ReportGenerationAgent implements Agent {
 
         try {
             var response = llmClient.chat(ctx).block();
+            if (response != null && response.isError()) {
+                // 报告是多 Agent 分析的最终产物，失败时必须显式回报，
+                // 否则用户会收到一份空白报告却以为分析成功了。
+                log.warn("ReportGeneration LLM call failed: {}", response.getErrorMessage());
+                return AgentResult.builder()
+                    .success(false)
+                    .error("LLM call failed: " + response.getErrorMessage())
+                    .build();
+            }
             String report = (response != null) ? response.getContent() : null;
             log.debug("ReportGeneration: {} chars", report != null ? report.length() : 0);
             return AgentResult.builder()

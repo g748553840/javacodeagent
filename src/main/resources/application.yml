@@ -104,6 +104,10 @@ agents:
 
 agent:
   max-tool-call-depth: 50
+  retry:
+    enabled: true          # LLM 瞬时故障重试（429/502/超时等）
+    max-attempts: 3        # 总尝试次数，含首次调用
+    base-delay: 1s         # 纯指数退避：1s → 2s → 4s（无 jitter）
 
 skills:
   enabled: true
@@ -115,8 +119,12 @@ hooks:
 context:
   compression:
     enabled: true
-    threshold: 40
-    keep-recent: 10
+    threshold: 40              # 条数模式触发阈值（token-based=false 时生效）
+    keep-recent: 10            # 条数模式保留条数
+    token-based: true          # 按 token 预算触发，并用切点算法避免切开工具调用配对
+    max-tokens: 100000         # 上下文窗口预算
+    reserve-tokens: 16384      # 为响应预留，超过 max-tokens - reserve 即压缩
+    keep-recent-tokens: 20000  # 尾部保留的 token 预算
 
 tasks:
   enabled: true

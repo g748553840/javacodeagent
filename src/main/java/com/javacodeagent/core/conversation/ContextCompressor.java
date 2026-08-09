@@ -5,6 +5,9 @@ import com.javacodeagent.core.enums.MessageType;
 import com.javacodeagent.core.llm.LLMClient;
 import com.javacodeagent.core.model.ConversationContext;
 import com.javacodeagent.core.model.Message;
+import com.javacodeagent.piagent.compaction.CutPoint;
+import com.javacodeagent.piagent.compaction.CutPointFinder;
+import com.javacodeagent.piagent.compaction.TokenEstimator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,6 +20,14 @@ import java.util.UUID;
 /**
  * Context compressor that uses the LLM to generate semantic summaries of old messages,
  * reducing token usage while preserving important context.
+ *
+ * <p>支持两种切分策略：
+ * <ul>
+ *   <li><b>token 模式</b>（默认）：按 token 预算触发，用 {@link CutPointFinder}
+ *       选择合法切点，保证不切开 tool_use / tool_result 配对</li>
+ *   <li><b>条数模式</b>：按消息条数触发并保留最近 N 条（旧行为，配置
+ *       {@code context.compression.token-based=false} 启用）</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -31,38 +42,124 @@ public class ContextCompressor {
 
     private final LLMClient llmClient;
     private final ContextCompressionConfig compressionConfig;
+    private final CutPointFinder cutPointFinder;
+    private final TokenEstimator tokenEstimator;
 
     /**
-     * Compresses the conversation context when message count exceeds the threshold.
+     * Compresses the conversation context when it exceeds the configured budget.
      * Uses LLM summarization for accurate semantic compression.
      */
     public Mono<ConversationContext> compress(ConversationContext context) {
         if (!compressionConfig.isEnabled()
                 || context.getMessages() == null
-                || context.getMessages().size() <= compressionConfig.getThreshold()) {
+                || context.getMessages().isEmpty()) {
             return Mono.just(context);
         }
 
         List<Message> messages = context.getMessages();
-        int keepRecent = Math.min(compressionConfig.getKeepRecent(), messages.size() - 1);
-        if (keepRecent < 0) {
+        Split split = compressionConfig.isTokenBased()
+            ? splitByTokenBudget(messages)
+            : splitByMessageCount(messages);
+
+        if (split == null) {
             return Mono.just(context);
         }
-        List<Message> toCompress = new ArrayList<>(
-            messages.subList(0, messages.size() - keepRecent));
-        List<Message> toKeep = new ArrayList<>(
-            messages.subList(messages.size() - keepRecent, messages.size()));
 
-        log.info("Compressing context: {} messages -> LLM summary + {} recent",
-            messages.size(), toKeep.size());
+        log.info("Compressing context: {} messages -> LLM summary + {} recent ({} mode)",
+            messages.size(), split.toKeep().size(),
+            compressionConfig.isTokenBased() ? "token" : "count");
 
-        return buildLLMSummary(toCompress, context)
-            .map(summary -> buildCompressedContext(context, summary, toKeep))
+        return buildLLMSummary(split.toCompress(), context)
+            .map(summary -> buildCompressedContext(context, summary, split.toKeep()))
             .onErrorResume(e -> {
                 log.warn("LLM summarization failed, using fallback string summary", e);
-                String fallbackSummary = buildFallbackSummary(toCompress);
-                return Mono.just(buildCompressedContext(context, fallbackSummary, toKeep));
+                String fallbackSummary = buildFallbackSummary(split.toCompress());
+                return Mono.just(buildCompressedContext(context, fallbackSummary, split.toKeep()));
             });
+    }
+
+    /** 切分结果：前半段被摘要，后半段保留原文。 */
+    private record Split(List<Message> toCompress, List<Message> toKeep) {}
+
+    /**
+     * token 预算模式：超过 {@code maxTokens - reserveTokens} 时触发，
+     * 由 {@link CutPointFinder} 选择不破坏工具调用配对的切点。
+     */
+    private Split splitByTokenBudget(List<Message> messages) {
+        int estimated = tokenEstimator.estimateMessages(messages);
+        int budget = compressionConfig.getMaxTokens() - compressionConfig.getReserveTokens();
+
+        if (estimated <= budget) {
+            return null;
+        }
+
+        CutPoint cut = cutPointFinder.find(messages, compressionConfig.getKeepRecentTokens());
+        if (cut.nothingToCompact()) {
+            log.debug("Context over budget ({} > {}) but no valid cut point; skipping compaction",
+                estimated, budget);
+            return null;
+        }
+
+        log.debug("Token budget exceeded: {} > {}, cutting at index {} (splitTurn={})",
+            estimated, budget, cut.index(), cut.splitTurn());
+
+        return new Split(
+            new ArrayList<>(messages.subList(0, cut.index())),
+            new ArrayList<>(messages.subList(cut.index(), messages.size()))
+        );
+    }
+
+    /**
+     * 消息条数模式（旧行为）。
+     *
+     * <p>即便在此模式下也会对切点做合法性修正——原实现直接按
+     * {@code size - keepRecent} 切分，可能把 tool_use 留在摘要区
+     * 而 tool_result 留在保留区，导致 Anthropic API 拒绝该消息序列。
+     */
+    private Split splitByMessageCount(List<Message> messages) {
+        if (messages.size() <= compressionConfig.getThreshold()) {
+            return null;
+        }
+        int keepRecent = Math.min(compressionConfig.getKeepRecent(), messages.size() - 1);
+        if (keepRecent < 0) {
+            return null;
+        }
+
+        int cutIndex = adjustCutIndexForToolPairing(messages, messages.size() - keepRecent);
+        if (cutIndex <= 0 || cutIndex >= messages.size()) {
+            return null;
+        }
+
+        return new Split(
+            new ArrayList<>(messages.subList(0, cutIndex)),
+            new ArrayList<>(messages.subList(cutIndex, messages.size()))
+        );
+    }
+
+    /**
+     * 向后推移切点直到不破坏 tool_use / tool_result 配对。
+     *
+     * <p>返回值可能等于 {@code messages.size()}（尾部全是工具结果），
+     * 调用方需检查边界。
+     */
+    private int adjustCutIndexForToolPairing(List<Message> messages, int cutIndex) {
+        int i = Math.max(1, cutIndex);
+        while (i < messages.size()) {
+            if (messages.get(i).getType() == MessageType.TOOL_RESULT) {
+                i++;
+                continue;
+            }
+            Message prev = messages.get(i - 1);
+            boolean prevHasToolCalls = prev.getType() == MessageType.ASSISTANT
+                && prev.getToolCalls() != null
+                && !prev.getToolCalls().isEmpty();
+            if (prevHasToolCalls) {
+                i++;
+                continue;
+            }
+            return i;
+        }
+        return i;
     }
 
     private Mono<String> buildLLMSummary(List<Message> messages, ConversationContext originalContext) {
@@ -92,9 +189,18 @@ public class ContextCompressor {
             .build();
 
         return llmClient.chat(summarizationContext)
+            // LLM 客户端现在以 error 标记表达失败而非抛异常，
+            // 这里必须显式检查，否则失败响应的空 content 会被当作合法摘要。
+            .filter(response -> {
+                if (response.isError()) {
+                    log.warn("Summarization LLM call failed: {}", response.getErrorMessage());
+                    return false;
+                }
+                return true;
+            })
             .map(response -> response.getContent() != null ? response.getContent() : "")
-            .filter(s -> !s.isEmpty())
-            .switchIfEmpty(Mono.just(buildFallbackSummary(messages)));
+            .filter(s -> !s.isBlank())
+            .switchIfEmpty(Mono.fromSupplier(() -> buildFallbackSummary(messages)));
     }
 
     private String formatMessagesForSummary(List<Message> messages) {

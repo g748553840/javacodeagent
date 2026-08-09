@@ -86,7 +86,16 @@ public class Nl2SqlService {
             .build();
 
         return llmClient.chat(ctx)
-            .filter(response -> response != null && response.getContent() != null && !response.getContent().isBlank())
+            // LLM 调用失败时抛出携带原因的异常。若只靠下面的 filter 拦截，
+            // 空 content 会退化成笼统的 "empty response"，丢失 429/超时等真正的失败原因。
+            .flatMap(response -> {
+                if (response != null && response.isError()) {
+                    return reactor.core.publisher.Mono.<com.javacodeagent.core.model.LLMResponse>error(
+                        new IllegalStateException("NL2SQL LLM call failed: " + response.getErrorMessage()));
+                }
+                return reactor.core.publisher.Mono.justOrEmpty(response);
+            })
+            .filter(response -> response.getContent() != null && !response.getContent().isBlank())
             .switchIfEmpty(reactor.core.publisher.Mono.error(new IllegalStateException("LLM returned empty response for NL2SQL")))
             .map(response -> {
                 Nl2SqlResult result = parseNl2SqlResult(response.getContent());

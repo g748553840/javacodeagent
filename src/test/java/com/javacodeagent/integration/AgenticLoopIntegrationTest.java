@@ -229,4 +229,35 @@ class AgenticLoopIntegrationTest {
         assertThat(resp).isNotNull();
         assertThat(resp.getContent()).containsIgnoringCase("Maximum tool call depth");
     }
+
+    // ------------------------------------------------------------------
+    // 场景 5：LLM 调用失败（重试耗尽 / 不可重试错误）
+    // ------------------------------------------------------------------
+
+    /**
+     * LLM 失败响应必须以明确的失败信息返回，而不能被当作助手回复。
+     *
+     * <p>历史上客户端把传输异常吞掉、转成 {@code content="Error: ..."} 的正常响应，
+     * 结果这段文本会被持久化进对话历史，污染后续每一轮的上下文——模型会以为
+     * 自己上一轮真的说了这句话。
+     */
+    @Test
+    void processMessage_llmError_returnsFailureWithoutPollutingHistory() {
+        LLMResponse failure = LLMResponse.ofError("503 Service Unavailable");
+        when(llmClient.chat(any())).thenReturn(Mono.just(failure));
+
+        ConversationRequest req = ConversationRequest.builder()
+            .conversationId(UUID.randomUUID().toString())
+            .content("Anything")
+            .userId("user-llm-error")
+            .build();
+
+        ConversationResponse resp = conversationManager.processMessage(req).block();
+
+        assertThat(resp).isNotNull();
+        assertThat(resp.getContent())
+            .as("failure must be surfaced explicitly, not disguised as an assistant reply")
+            .contains("LLM request failed")
+            .contains("503");
+    }
 }

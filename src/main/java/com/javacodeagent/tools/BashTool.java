@@ -4,6 +4,9 @@ import com.javacodeagent.core.enums.PermissionType;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.Tool;
+import com.javacodeagent.piagent.tool.AbortSignal;
+import com.javacodeagent.piagent.tool.AbortedException;
+import com.javacodeagent.piagent.tool.ToolUpdateCallback;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -80,6 +83,23 @@ public class BashTool implements Tool {
 
     @Override
     public ToolExecutionResult execute(Map<String, Object> input, ExecutionContext context) {
+        return execute(input, context, AbortSignal.NEVER, null);
+    }
+
+    /**
+     * 支持中止与流式输出的执行入口。
+     *
+     * <p>相比基础版本增加两项能力：
+     * <ul>
+     *   <li>收到中止信号时立即销毁子进程，而不是等命令自然结束</li>
+     *   <li>逐行推送输出，让前端能实时看到长命令的进展</li>
+     * </ul>
+     */
+    @Override
+    public ToolExecutionResult execute(Map<String, Object> input,
+                                       ExecutionContext context,
+                                       AbortSignal signal,
+                                       ToolUpdateCallback onUpdate) {
         String command = (String) input.get("command");
         if (command == null || command.isBlank()) {
             return ToolExecutionResult.error("command is required");
@@ -99,7 +119,7 @@ public class BashTool implements Tool {
                 .build();
         }
 
-        return executeSync(command, input, context);
+        return executeSync(command, input, context, signal, onUpdate);
     }
 
     /**
@@ -114,7 +134,11 @@ public class BashTool implements Tool {
         return true;
     }
 
-    private ToolExecutionResult executeSync(String command, Map<String, Object> input, ExecutionContext context) {
+    private ToolExecutionResult executeSync(String command,
+                                            Map<String, Object> input,
+                                            ExecutionContext context,
+                                            AbortSignal signal,
+                                            ToolUpdateCallback onUpdate) {
         int timeout = input.get("timeout") != null
             ? ((Number) input.get("timeout")).intValue()
             : DEFAULT_TIMEOUT_MS;
@@ -138,12 +162,31 @@ public class BashTool implements Tool {
         try {
             process = processBuilder.start();
 
+            // 中止时立即销毁子进程。注册在 start() 之后、读取之前，
+            // 确保中止信号在命令执行期间的任意时刻都能生效。
+            final Process running = process;
+            if (signal != null) {
+                signal.onAbort(() -> {
+                    if (running.isAlive()) {
+                        log.info("Destroying bash process due to abort signal");
+                        running.destroyForcibly();
+                    }
+                });
+            }
+
             StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    // 每读一行检查一次中止——协作式中止的检查点
+                    if (signal != null) {
+                        signal.throwIfAborted();
+                    }
                     output.append(line).append("\n");
+                    if (onUpdate != null) {
+                        onUpdate.update(Map.of("output", line));
+                    }
                 }
             }
 
@@ -165,6 +208,10 @@ public class BashTool implements Tool {
                 .metadata(metadata)
                 .build();
 
+        } catch (AbortedException e) {
+            // 中止是预期路径：进程已由 onAbort 回调销毁，这里只需回报状态
+            log.info("Bash command aborted: {}", command);
+            return ToolExecutionResult.error("Command aborted by user");
         } catch (Exception e) {
             // 无论异常发生在启动、读取输出还是 waitFor 阶段（包括被中断），
             // 只要进程已经启动就必须显式销毁，否则子进程会成为孤儿进程继续运行

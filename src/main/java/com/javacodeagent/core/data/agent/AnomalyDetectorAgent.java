@@ -87,6 +87,15 @@ public class AnomalyDetectorAgent implements Agent {
 
         try {
             var response = llmClient.chat(ctx).block();
+            if (response != null && response.isError()) {
+                // LLM 调用失败时明确回报，而非把空 content 解析成"未发现异常"——
+                // 那会让调用方误以为数据是健康的。
+                log.warn("AnomalyDetector LLM call failed: {}", response.getErrorMessage());
+                return AgentResult.builder()
+                    .success(false)
+                    .error("LLM call failed: " + response.getErrorMessage())
+                    .build();
+            }
             String raw = (response != null) ? response.getContent() : null;
             List<String> anomalies = parseJsonArray(raw);
             log.debug("AnomalyDetector found {} anomalies", anomalies.size());

@@ -88,7 +88,15 @@ public class DashboardGenerator {
 
                 return llmClient.chat(ctx);
             })
-            .flatMap(resp -> executeDashboardSqls(resp.getContent(), question, targetConnector));
+            .flatMap(resp -> {
+                // LLM 调用失败时给出明确原因，而不是把空 content 交给
+                // executeDashboardSqls 解析成笼统的 "No JSON array in LLM output"。
+                if (resp.isError()) {
+                    return Mono.error(new IllegalStateException(
+                        "Dashboard LLM call failed: " + resp.getErrorMessage()));
+                }
+                return executeDashboardSqls(resp.getContent(), question, targetConnector);
+            });
     }
 
     private Mono<DashboardSpec> executeDashboardSqls(String llmOutput, String question,
