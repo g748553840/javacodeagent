@@ -8,6 +8,7 @@ import com.javacodeagent.core.hook.HookType;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.Tool;
+import com.javacodeagent.piagent.tool.ToolExecutionMode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -88,6 +89,21 @@ public class GitTool implements Tool {
     @Override
     public PermissionType getRequiredPermission() {
         return PermissionType.GIT_OPERATION;
+    }
+
+    /**
+     * git 操作串行执行。
+     *
+     * <p>git 的索引（{@code .git/index}）是单一共享状态，还有 {@code index.lock}
+     * 这个显式互斥文件。并行跑 {@code add} 和 {@code commit} 时，后者可能在前者
+     * 完成暂存前就提交，得到一个内容不完整的 commit；两个写操作同时进行则会有一个
+     * 直接因拿不到 lock 而失败。即便是只读的 {@code status}，与并发的 {@code add}
+     * 交错时读到的也是中间态。区分读写命令再决定模式是可以做的，但收益很小——
+     * git 命令本身通常在百毫秒级，省下的并行时间不值得引入这种细粒度判断。
+     */
+    @Override
+    public ToolExecutionMode getExecutionMode() {
+        return ToolExecutionMode.SEQUENTIAL;
     }
 
     @Override

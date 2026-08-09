@@ -6,6 +6,7 @@ import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.Tool;
 import com.javacodeagent.piagent.tool.AbortSignal;
 import com.javacodeagent.piagent.tool.AbortedException;
+import com.javacodeagent.piagent.tool.ToolExecutionMode;
 import com.javacodeagent.piagent.tool.ToolUpdateCallback;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -79,6 +80,22 @@ public class BashTool implements Tool {
     @Override
     public PermissionType getRequiredPermission() {
         return PermissionType.SHELL_EXECUTE;
+    }
+
+    /**
+     * Shell 命令串行执行。
+     *
+     * <p>命令内容对我们完全不透明——{@code npm install}、{@code rm -rf}、
+     * {@code cd && make} 都只是一个字符串。既无法判断两条命令是否触碰同一份状态，
+     * 也无法在出问题后归因（并发下的失败往往不可复现）。默认串行，
+     * 把「这两条命令可以同时跑」的判断留给人。
+     *
+     * <p>注意后台执行（{@code background: true}）不受此限制：它走
+     * {@code BackgroundTaskExecutor}，立即返回 taskId，本来就不占批次时间。
+     */
+    @Override
+    public ToolExecutionMode getExecutionMode() {
+        return ToolExecutionMode.SEQUENTIAL;
     }
 
     @Override

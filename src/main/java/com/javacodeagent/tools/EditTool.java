@@ -4,6 +4,7 @@ import com.javacodeagent.core.enums.PermissionType;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.Tool;
+import com.javacodeagent.piagent.tool.ToolExecutionMode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -77,6 +78,23 @@ public class EditTool implements Tool {
     @Override
     public PermissionType getRequiredPermission() {
         return PermissionType.FILE_WRITE;
+    }
+
+    /**
+     * 编辑串行执行。
+     *
+     * <p>本工具是「读全文 → 字符串替换 → 写回」，没有任何原子性保证。两个 Edit
+     * 并发修改同一文件时，后写的会以自己读到的旧内容为基础整体覆盖，前一次的修改
+     * 直接消失——而且两次都报告成功，用户看不出丢了东西。模型在一批里连续编辑
+     * 同一文件是常见行为（改完实现再改调用点），所以这不是罕见路径。
+     *
+     * <p>只在真正冲突的文件上串行、其余并行是可行的，但需要在准备阶段解析
+     * {@code file_path} 并做规范化（相对/绝对、符号链接、大小写不敏感的文件系统），
+     * 判错的代价是静默丢数据。整体串行更稳妥。
+     */
+    @Override
+    public ToolExecutionMode getExecutionMode() {
+        return ToolExecutionMode.SEQUENTIAL;
     }
 
     @Override

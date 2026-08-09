@@ -6,9 +6,11 @@ import com.javacodeagent.config.JwtAuthFilter;
 import com.javacodeagent.core.conversation.ConversationManager;
 import com.javacodeagent.core.conversation.ConversationRequest;
 import com.javacodeagent.core.conversation.ConversationResponse;
+import com.javacodeagent.piagent.abort.AbortRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,10 +40,15 @@ import java.util.UUID;
  * <p>SSE event format:
  * <pre>
  *   data: {"type":"tool_start","tool":"&lt;name&gt;","id":"&lt;id&gt;"}\n\n
- *   data: {"type":"tool_result","tool":"&lt;name&gt;","success":true,"preview":"..."}\n\n
+ *   data: {"type":"tool_progress","tool":"&lt;name&gt;","id":"&lt;id&gt;","data":{"output":"..."}}\n\n
+ *   data: {"type":"tool_result","tool":"&lt;name&gt;","id":"&lt;id&gt;","success":true,"preview":"..."}\n\n
  *   data: {"type":"content","text":"&lt;text chunk&gt;"}\n\n
  *   data: {"type":"done","conversationId":"&lt;id&gt;"}\n\n
  * </pre>
+ *
+ * <p>{@code tool_progress} 只有覆盖了流式执行入口的工具才会发（目前是 BashTool，
+ * 逐行推送子进程输出）。{@code done} 事件可能带上 {@code terminatedByTool:true}
+ * （工具要求交还控制权，如 ExitPlanMode）或 {@code aborted:true}（被中止）。
  */
 @Slf4j
 @RestController
@@ -51,6 +58,7 @@ public class ConversationWebSocketHandler {
 
     private final ConversationManager conversationManager;
     private final ObjectMapper objectMapper;
+    private final AbortRegistry abortRegistry;
 
     /** sessionId → conversationId 映射，有界 LRU（最多保留 1000 条），防止内存无限增长 */
     private static final int MAX_SESSIONS = 1000;
@@ -149,6 +157,44 @@ public class ConversationWebSocketHandler {
                     activeSessions.put(sessionId, response.getConversationId());
                 }
             });
+    }
+
+    // -------------------------------------------------------------------------
+    // 中止
+    // -------------------------------------------------------------------------
+
+    /**
+     * 中止一个正在执行的会话。
+     *
+     * <p>这是「停止」按钮的后端。它不等待也不回滚：只是把该会话的
+     * {@link com.javacodeagent.piagent.tool.AbortSignal} 置位，由在途工具在下一个
+     * 检查点自行退出（{@code BashTool} 会销毁子进程），Agent 循环则不再发起新一轮
+     * LLM 调用。已经写入磁盘的文件、已经提交的 git commit 不会被撤销——
+     * 中止的语义是"别再往下做了"，不是"当作没发生过"。
+     *
+     * <p>客户端直接断开 SSE 连接也会触发同样的中止，此端点用于
+     * 长轮询/非流式调用，或者前端想在关闭连接前明确表达意图的场景。
+     *
+     * @return 404 表示该会话当前不在执行中（已结束或从未开始）
+     */
+    @PostMapping("/chat/{conversationId}/abort")
+    public ResponseEntity<Map<String, Object>> abort(
+            @PathVariable String conversationId,
+            @RequestBody(required = false) Map<String, String> body) {
+
+        String reason = body != null && body.get("reason") != null
+            ? body.get("reason")
+            : "Aborted by user";
+
+        boolean aborted = abortRegistry.abort(conversationId, reason);
+        if (!aborted) {
+            log.debug("Abort requested for inactive conversation {}", conversationId);
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(Map.of(
+            "conversationId", conversationId,
+            "aborted", true,
+            "reason", reason));
     }
 
     // -------------------------------------------------------------------------

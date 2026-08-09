@@ -855,21 +855,73 @@ public interface Tool {
     default boolean requiresPermission() { return false; }
     default PermissionType getRequiredPermission() { return null; }
     default boolean isBlocking() { return false; }  // 阻塞工具走 boundedElastic
+
+    // 以下三个 default 方法为增量能力，既有工具无需改动
+    default ToolExecutionMode getExecutionMode() { return null; }        // null = 继承全局策略
+    default Map<String, Object> prepareArguments(Map<String, Object> raw) { return raw; }
+    default ToolExecutionResult execute(Map<String, Object> input, ExecutionContext context,
+                                        AbortSignal signal, ToolUpdateCallback onUpdate) {
+        return execute(input, context);   // 默认委托给同步版本
+    }
 }
 ```
 
-**执行流程：**
+**单个调用的执行流程：**
 
 ```
 ToolManager.executeToolCall(toolCall, context)
     ├── 1. 查找工具（tools Map）
     ├── 2. 权限检查（PermissionService）
-    ├── 3. Pre-Hook（HookType.PRE_TOOL_CALL）
-    ├── 4. 若 isBlocking()：Mono.fromCallable().subscribeOn(Schedulers.boundedElastic()).block()
-    │      否则：tool.execute(input, context) 直接调用
-    ├── 5. Post-Hook（HookType.POST_TOOL_CALL）
-    └── 6. 返回 ToolExecutionResult
+    ├── 3. 参数适配（prepareArguments）
+    ├── 4. Pre-Hook（HookType.PRE_TOOL_CALL）
+    ├── 5. 若 isBlocking()：Mono.fromCallable().subscribeOn(Schedulers.boundedElastic()).block()
+    │      否则：tool.execute(...) 直接调用
+    ├── 6. Post-Hook（HookType.POST_TOOL_CALL）
+    └── 7. 返回 ToolExecutionResult
 ```
+
+**批量调用的三阶段模型（`ToolManager.executeBatch`）：**
+
+一次 LLM 响应通常带回多个 `tool_use`。它们不是简单地逐个跑完——三个阶段各自解决一个问题：
+
+```
+executeBatch(toolCalls, context, signal, observer)
+    ├── 阶段 1 串行准备 —— 工具查找、权限、参数适配、Pre-Hook
+    │     必须串行：权限审批是有序交互，并发发起会让弹窗顺序取决于线程调度
+    ├── 阶段 2 并行执行 —— flatMapSequential(concurrency)
+    │     只有这一段并发，也只有这一段值得并发（读 5 个文件的等待可以叠加省掉）
+    └── 阶段 3 顺序发射 —— 按 assistant 声明 tool_use 的顺序产出 tool_result
+          与完成先后无关：乱序会让模型把结果归错工具
+```
+
+**硬性不变量**：无论工具失败、被权限拒绝、被钩子拦截还是被中止，**每个 `tool_use` 都必须有一条配对的 `tool_result`**。少一条，下一轮请求就会被 Anthropic API 拒绝，整轮对话卡死——而且报错信息与真正的原因相距很远，极难排查。
+
+**执行模式与并发安全：**
+
+| 工具 | 模式 | 原因 |
+|------|------|------|
+| `Read` `Glob` `Grep` `List` `SqlQuery` | 并行（默认） | 纯读，无共享状态 |
+| `Write` `Edit` | `SEQUENTIAL` | "读全文→替换→写回"无原子性；并发改同一文件会静默丢修改 |
+| `Bash` | `SEQUENTIAL` | 命令内容不透明，无法判断两条命令是否触碰同一份状态 |
+| `Git` | `SEQUENTIAL` | `.git/index` 是单一共享状态，还有 `index.lock` 显式互斥 |
+| `ExitPlanMode` | `SEQUENTIAL` | 成功即终止循环，不应与其他工具并发 |
+
+批次规则是**「有任意一个 SEQUENTIAL 则整批串行」**。看起来粗暴，但替代方案要回答一个没有好答案的问题：串行工具与并行工具之间要不要加屏障？不加则声明形同虚设，加了则等于整批串行，只是绕了一圈。
+
+这样划分之后，真正吃到并行收益的是「一次读多个文件 / 跑多个 grep」——恰好是最常见也最耗时的场景；而任何涉及写入的批次自动退回原先的串行行为，**没有引入新的并发风险**。
+
+```yaml
+agent:
+  tool:
+    parallel-enabled: true    # 关掉即回到逐个执行的老行为，排查并发问题的第一个开关
+    max-parallelism: 4        # 不设无上限：并发工具会与 JPA 持久化抢 boundedElastic 线程
+```
+
+**提前终止（terminate）：**
+
+`ToolExecutionResult.terminate=true` 表示「执行成功了，但不该再让模型继续自主行动」。目前唯一的生产者是 `ExitPlanMode`——计划已经写完，下一步该由人决定批不批。
+
+判定采用**「全部一致」原则**：只有当一批里**所有**工具都要求 terminate 时才真正停止。若按「任一为真」，批次 `[ExitPlanMode, Read]` 中 `Read` 的结果就永远不会被模型看到，它的执行完全浪费，用户也拿不到那份数据。
 
 **路径安全（Path Traversal 防护）：**
 
@@ -883,17 +935,40 @@ if (!resolved.startsWith(workingDir)) {
 
 ---
 
+### 3.1 中止（Abort）
+
+`AbortSignal` 是协作式的：不用 `Thread.interrupt()`（对 CPU 密集循环和阻塞式 `InputStream.read()` 无效），也不用已废弃的 `Thread.stop()`（会在任意字节码位置抛异常，留下不一致的对象）。代价是需要工具作者配合调用 `throwIfAborted()` 或注册 `onAbort`，换来的是中止点的状态完全可控。
+
+`AbortRegistry` 以 conversationId 为键维护在途信号——发起中止的是另一个 HTTP 请求，与对话所在的响应式链路完全不在一个调用栈上，需要这样一个中间登记处。
+
+三条触发路径：
+
+| 触发方式 | 说明 |
+|---------|------|
+| `POST /api/v1/chat/{conversationId}/abort` | 「停止」按钮。404 表示该会话不在执行中 |
+| 客户端断开 SSE 连接 | `doOnCancel` 自动中止，否则用户关掉页面后 `npm install` 仍会跑完 |
+| — | 中止后当前批次内的剩余工具快速返回，Agent 循环不再发起新一轮 LLM 调用 |
+
+**中止的语义是「别再往下做了」，不是「当作没发生过」**：已写入的文件、已提交的 commit 不会回滚。
+
+---
+
 ### 4. SSE 流式传输
 
 **项目向客户端发出的 SSE 事件格式（`/api/v1/chat/stream`）：**
 
 ```
 data: {"type":"tool_start","tool":"Read","id":"toolu_01"}
-data: {"type":"tool_result","tool":"Read","success":true,"preview":"package com.example;..."}
+data: {"type":"tool_progress","tool":"Bash","id":"toolu_02","data":{"output":"npm WARN deprecated ..."}}
+data: {"type":"tool_result","tool":"Read","id":"toolu_01","success":true,"preview":"package com.example;..."}
 data: {"type":"content","text":"根据文件内容，"}
 data: {"type":"done","conversationId":"conv-uuid-xxxx"}
+data: {"type":"done","conversationId":"conv-uuid-xxxx","terminatedByTool":true}
+data: {"type":"done","conversationId":"conv-uuid-xxxx","aborted":true}
 data: {"type":"error","message":"Maximum tool call depth exceeded"}
 ```
+
+`tool_progress` 只有覆盖了流式执行入口的工具才会发（目前是 `BashTool`，逐行推送子进程输出）。`done` 上的 `terminatedByTool` / `aborted` 标记让前端能区分「正常说完了」「工具交还了控制权」「被中止了」三种收尾。
 
 **流式架构：**
 
@@ -908,10 +983,12 @@ ConversationManager.processMessageStream()
               ├── TOOL_CALL chunk → 积累 toolChunks
               └── DONE chunk    →
                    ├── toolChunks 非空：
-                   │    emit "tool_start" → 执行工具 → emit "tool_result"
-                   │    → 持久化 → 递归 executeStreamingLoop(depth+1)
+                   │    executeBatch(观察者实时推送 tool_start/tool_progress/tool_result)
+                   │    → 持久化 → terminate? 收尾 : 递归 executeStreamingLoop(depth+1)
                    └── toolChunks 为空：emit "done"
 ```
+
+**工具事件为什么走 sink**：工具现在可能并行执行，而 `executeBatch` 只在全部结束后返回一个结果对象。要让 `tool_start` 和 Bash 的逐行输出在执行期间就到达浏览器，必须有一条独立于返回值的旁路——即 `Sinks.Many`。合并用 `mergeSequential` 而非 `merge`：两者都会立即订阅（工具照常开跑），但前者保证工具事件全部发完才轮到续流，否则 `done` 可能插到尚未排空的 `tool_result` 前面，而客户端通常收到 `done` 就停止监听，那些结果就丢了。
 
 **两个客户端的流式实现差异：**
 

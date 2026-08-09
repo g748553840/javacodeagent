@@ -4,6 +4,7 @@ import com.javacodeagent.core.enums.PermissionType;
 import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.Tool;
+import com.javacodeagent.piagent.tool.ToolExecutionMode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -65,6 +66,19 @@ public class WriteTool implements Tool {
     @Override
     public PermissionType getRequiredPermission() {
         return PermissionType.FILE_WRITE;
+    }
+
+    /**
+     * 写文件串行执行。
+     *
+     * <p>与 {@link EditTool#getExecutionMode()} 同理，且这里还多一层跨工具的风险：
+     * 同一批里 Write 一个文件、再 Edit 同一个文件时，Edit 可能读到写入前的内容。
+     * 由于「一批中有任一工具声明 SEQUENTIAL 则整批串行」，两者都声明串行，
+     * 才能保证这种跨工具的先后依赖成立。
+     */
+    @Override
+    public ToolExecutionMode getExecutionMode() {
+        return ToolExecutionMode.SEQUENTIAL;
     }
 
     @Override

@@ -16,11 +16,16 @@ import com.javacodeagent.core.model.Message;
 import com.javacodeagent.core.model.ToolCall;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.core.tool.ToolManager;
+import com.javacodeagent.piagent.abort.AbortRegistry;
+import com.javacodeagent.piagent.tool.AbortSignal;
+import com.javacodeagent.piagent.tool.ToolBatchObserver;
+import com.javacodeagent.piagent.tool.ToolBatchResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
@@ -48,6 +53,7 @@ public class ConversationManager {
     private final MessagePersistenceService messagePersistence;
     private final HookManager hookManager;
     private final AgentConfig agentConfig;
+    private final AbortRegistry abortRegistry;
 
     // -------------------------------------------------------------------------
     // 公开入口
@@ -58,34 +64,51 @@ public class ConversationManager {
             request.setConversationId(UUID.randomUUID().toString());
         }
         String convId = request.getConversationId();
-        // loadHistory() 是阻塞 JPA 调用，必须在 boundedElastic 线程执行
-        return Mono.fromCallable(() -> messagePersistence.loadHistory(convId))
-            .subscribeOn(Schedulers.boundedElastic())
-            .flatMap(history -> {
-                ConversationContext context = contextBuilder.build(request, history);
-                return processWithToolCalls(context, 0);
-            });
+
+        // defer 保证登记发生在订阅时而非装配时——装配时登记会让一个从未被订阅的
+        // Mono 在注册表里留下永远不会被释放的条目
+        return Mono.defer(() -> {
+                abortRegistry.register(convId);
+                // loadHistory() 是阻塞 JPA 调用，必须在 boundedElastic 线程执行
+                return Mono.fromCallable(() -> messagePersistence.loadHistory(convId))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .flatMap(history -> {
+                        ConversationContext context = contextBuilder.build(request, history);
+                        return processWithToolCalls(context, 0);
+                    });
+            })
+            .doOnCancel(() -> abortRegistry.abort(convId, "Client cancelled the request"))
+            .doFinally(signal -> abortRegistry.release(convId));
     }
 
     /**
      * 流式 SSE 端点。
      * 使用 chatStreamFull() 实现 Token 级流式 + 工具调用协作：
-     *   - 工具调用：先 emit tool_start / tool_result 事件，再继续下一轮 LLM
+     *   - 工具调用：实时 emit tool_start / tool_progress / tool_result 事件，再继续下一轮 LLM
      *   - 文本：逐 token emit content 事件
      *   - 结束：emit done 事件
+     *
+     * <p>客户端断开（SSE 连接关闭）会取消整条链路，进而中止在途工具——
+     * 否则一个被用户关掉的页面仍会让服务端把 {@code npm install} 跑完。
      */
     public Flux<String> processMessageStream(ConversationRequest request) {
         if (request.getConversationId() == null) {
             request.setConversationId(UUID.randomUUID().toString());
         }
         String conversationId = request.getConversationId();
-        // loadHistory() 是阻塞 JPA 调用，必须在 boundedElastic 线程执行
-        return Mono.fromCallable(() -> messagePersistence.loadHistory(conversationId))
-            .subscribeOn(Schedulers.boundedElastic())
-            .flatMapMany(history -> {
-                ConversationContext context = contextBuilder.build(request, history);
-                return executeStreamingLoop(context, 0, conversationId);
-            });
+
+        return Flux.defer(() -> {
+                abortRegistry.register(conversationId);
+                // loadHistory() 是阻塞 JPA 调用，必须在 boundedElastic 线程执行
+                return Mono.fromCallable(() -> messagePersistence.loadHistory(conversationId))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .flatMapMany(history -> {
+                        ConversationContext context = contextBuilder.build(request, history);
+                        return executeStreamingLoop(context, 0, conversationId);
+                    });
+            })
+            .doOnCancel(() -> abortRegistry.abort(conversationId, "Client disconnected"))
+            .doFinally(signal -> abortRegistry.release(conversationId));
     }
 
     public Mono<ConversationResponse> processWithHistory(
@@ -105,6 +128,14 @@ public class ConversationManager {
         if (depth > agentConfig.getMaxToolCallDepth()) {
             return Mono.just(ConversationResponse.builder()
                 .content("Maximum tool call depth (" + agentConfig.getMaxToolCallDepth() + ") exceeded")
+                .conversationId(context.getConversationId())
+                .build());
+        }
+
+        AbortSignal signal = abortRegistry.signalFor(context.getConversationId());
+        if (signal.isAborted()) {
+            return Mono.just(ConversationResponse.builder()
+                .content("Conversation aborted: " + signal.getReason())
                 .conversationId(context.getConversationId())
                 .build());
         }
@@ -174,31 +205,36 @@ public class ConversationManager {
     private Mono<ConversationResponse> handleToolCalls(
             ParsedResponse parsed, ConversationContext context, int depth) {
 
-        List<Message> newMessages = new ArrayList<>();
+        List<ToolCall> toolCalls = parsed.getToolCalls();
+        AbortSignal signal = abortRegistry.signalFor(context.getConversationId());
 
-        newMessages.add(Message.builder()
-            .type(MessageType.ASSISTANT)
-            .content(parsed.getTextContent())
-            .toolCalls(parsed.getToolCalls())
-            .build());
+        return toolManager
+            .executeBatch(toolCalls, toExecutionContext(context), signal, ToolBatchObserver.NOOP)
+            // saveMessages 是阻塞 JPA 调用；executeBatch 的结果可能在任意工具线程上投递
+            .publishOn(Schedulers.boundedElastic())
+            .flatMap(batch -> {
+                List<Message> newMessages = new ArrayList<>();
+                newMessages.add(Message.builder()
+                    .type(MessageType.ASSISTANT)
+                    .content(parsed.getTextContent())
+                    .toolCalls(toolCalls)
+                    .build());
+                newMessages.addAll(batch.messages());
 
-        for (ToolCall toolCall : parsed.getToolCalls()) {
-            log.info("Executing tool: {} (id={})", toolCall.getName(), toolCall.getId());
-            ToolExecutionResult result = toolManager.executeToolCall(
-                toolCall, toExecutionContext(context));
-            log.info("Tool {} → success={}", toolCall.getName(), result.isSuccess());
+                messagePersistence.saveMessages(context.getConversationId(), newMessages);
 
-            newMessages.add(Message.builder()
-                .type(MessageType.TOOL_RESULT)
-                .content(result.isSuccess() ? result.getContent() : "Error: " + result.getError())
-                .toolCallId(toolCall.getId())
-                .build());
-        }
+                if (batch.terminate()) {
+                    log.info("Tool batch requested termination for conversation {} at depth {}",
+                        context.getConversationId(), depth);
+                    return Mono.just(ConversationResponse.builder()
+                        .content(terminationContent(parsed.getTextContent(), batch))
+                        .conversationId(context.getConversationId())
+                        .build());
+                }
 
-        messagePersistence.saveMessages(context.getConversationId(), newMessages);
-
-        ConversationContext nextContext = contextBuilder.buildWithResults(context, newMessages);
-        return processWithToolCalls(nextContext, depth + 1);
+                ConversationContext nextContext = contextBuilder.buildWithResults(context, newMessages);
+                return processWithToolCalls(nextContext, depth + 1);
+            });
     }
 
     // -------------------------------------------------------------------------
@@ -211,6 +247,14 @@ public class ConversationManager {
         if (depth > agentConfig.getMaxToolCallDepth()) {
             return Flux.just(sseEvent("error",
                 Map.of("message", "Maximum tool call depth exceeded")));
+        }
+
+        AbortSignal signal = abortRegistry.signalFor(conversationId);
+        if (signal.isAborted()) {
+            // 中止后不再发起新一轮 LLM 调用。用 done 而非 error 收尾：
+            // 中止是用户主动要的结果，不是故障
+            return Flux.just(sseEvent("done",
+                Map.of("conversationId", conversationId, "aborted", true)));
         }
 
         return compressor.compress(context)
@@ -284,49 +328,118 @@ public class ConversationManager {
             });
     }
 
+    /**
+     * 批量执行工具并继续对话循环，工具事件实时推送。
+     *
+     * <p><b>为什么要 sink</b>：工具现在可能并行执行，而 {@code executeBatch} 只在
+     * 全部结束后返回一个结果对象。要让 {@code tool_start} 和 BashTool 的逐行输出
+     * 在执行期间就到达浏览器，必须有一条独立于返回值的旁路——这就是 sink。
+     * 改造前这段代码把事件攒进 List 再一次性发出，即便工具跑了两分钟，
+     * 用户也是在结束的瞬间才同时看到「开始」和「结束」。
+     *
+     * <p><b>为什么是 mergeSequential 而不是 merge</b>：两者都会立即订阅两条流
+     * （所以工具会真的开始跑），但 mergeSequential 保证第一条流的元素全部先发。
+     * 用 merge 的话 {@code done} 可能插到尚未排空的 {@code tool_result} 前面，
+     * 而客户端通常在收到 done 后就停止监听，那些结果就丢了。
+     */
     private Flux<String> executeToolsAndContinue(
             List<ToolCall> toolCalls, String assistantText,
             ConversationContext context, int depth, String conversationId) {
 
-        List<String> events = new ArrayList<>();
-        List<Message> newMessages = new ArrayList<>();
+        Sinks.Many<String> toolEvents = Sinks.many().unicast().onBackpressureBuffer();
+        AbortSignal signal = abortRegistry.signalFor(conversationId);
 
-        // 助手消息（含工具调用记录）
-        newMessages.add(Message.builder()
-            .type(MessageType.ASSISTANT)
-            .content(assistantText)
-            .toolCalls(toolCalls)
-            .build());
+        ToolBatchObserver observer = new ToolBatchObserver() {
+            @Override
+            public void onStart(ToolCall call) {
+                toolEvents.tryEmitNext(sseEvent("tool_start",
+                    Map.of("tool", call.getName(), "id", idOf(call))));
+            }
 
-        for (ToolCall tc : toolCalls) {
-            events.add(sseEvent("tool_start",
-                Map.of("tool", tc.getName(), "id", tc.getId())));
+            @Override
+            public void onUpdate(ToolCall call, Map<String, Object> partial) {
+                toolEvents.tryEmitNext(sseEvent("tool_progress",
+                    Map.of("tool", call.getName(), "id", idOf(call), "data", partial)));
+            }
 
-            log.info("Stream loop: executing tool {} (id={})", tc.getName(), tc.getId());
-            ToolExecutionResult result = toolManager.executeToolCall(tc, toExecutionContext(context));
+            @Override
+            public void onComplete(ToolCall call, ToolExecutionResult result) {
+                toolEvents.tryEmitNext(sseEvent("tool_result",
+                    Map.of("tool", call.getName(),
+                           "id", idOf(call),
+                           "success", result.isSuccess(),
+                           "preview", preview(result))));
+            }
+        };
 
-            events.add(sseEvent("tool_result",
-                Map.of("tool", tc.getName(),
-                       "success", result.isSuccess(),
-                       "preview", preview(result))));
+        Flux<String> continuation = toolManager
+            .executeBatch(toolCalls, toExecutionContext(context), signal, observer)
+            // 兜底：异常与取消路径也要关掉 sink，否则 mergeSequential 永远等不到第一条流结束
+            .doFinally(sig -> toolEvents.tryEmitComplete())
+            // saveMessages 是阻塞 JPA 调用
+            .publishOn(Schedulers.boundedElastic())
+            .flatMapMany(batch -> {
+                // 正常路径在这里显式关闭，确保工具事件排在下面的续流之前
+                toolEvents.tryEmitComplete();
 
-            newMessages.add(Message.builder()
-                .type(MessageType.TOOL_RESULT)
-                .content(result.isSuccess() ? result.getContent() : "Error: " + result.getError())
-                .toolCallId(tc.getId())
-                .build());
-        }
+                List<Message> newMessages = new ArrayList<>();
+                newMessages.add(Message.builder()
+                    .type(MessageType.ASSISTANT)
+                    .content(assistantText)
+                    .toolCalls(toolCalls)
+                    .build());
+                newMessages.addAll(batch.messages());
 
-        messagePersistence.saveMessages(conversationId, newMessages);
+                messagePersistence.saveMessages(conversationId, newMessages);
 
-        ConversationContext nextContext = contextBuilder.buildWithResults(context, newMessages);
-        return Flux.fromIterable(events)
-            .concatWith(executeStreamingLoop(nextContext, depth + 1, conversationId));
+                if (batch.terminate()) {
+                    log.info("Tool batch requested termination for conversation {} at depth {}",
+                        conversationId, depth);
+                    String content = terminationContent(assistantText, batch);
+                    return Flux.just(
+                        sseEvent("content", Map.of("text", content)),
+                        sseEvent("done", Map.of(
+                            "conversationId", conversationId,
+                            "terminatedByTool", true)));
+                }
+
+                ConversationContext nextContext = contextBuilder.buildWithResults(context, newMessages);
+                return executeStreamingLoop(nextContext, depth + 1, conversationId);
+            });
+
+        return Flux.mergeSequential(toolEvents.asFlux(), continuation);
     }
 
     // -------------------------------------------------------------------------
     // 工具方法
     // -------------------------------------------------------------------------
+
+    /**
+     * 拼装因工具要求终止而提前结束时返回给用户的内容。
+     *
+     * <p>此时模型不会再有下一轮发言，助手文本（通常是"我已经拟好计划"）
+     * 单独看信息量不足，因此把终止工具的输出（例如完整的计划正文）一并带上。
+     */
+    private String terminationContent(String assistantText, ToolBatchResult batch) {
+        StringBuilder sb = new StringBuilder();
+        if (assistantText != null && !assistantText.isBlank()) {
+            sb.append(assistantText.trim());
+        }
+        for (ToolExecutionResult result : batch.results()) {
+            if (result.isSuccess() && result.getContent() != null && !result.getContent().isBlank()) {
+                if (!sb.isEmpty()) {
+                    sb.append("\n\n");
+                }
+                sb.append(result.getContent().trim());
+            }
+        }
+        return sb.toString();
+    }
+
+    /** ToolCall.id 可能为空，而 Map.of 不接受 null 值。 */
+    private static String idOf(ToolCall call) {
+        return call.getId() != null ? call.getId() : "";
+    }
 
     private void persistNewMessages(ConversationContext context) {
         // 只持久化最后一条用户消息 + 助手回复（已在 context.messages 末尾）

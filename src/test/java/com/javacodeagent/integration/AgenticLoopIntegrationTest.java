@@ -5,12 +5,18 @@ import com.javacodeagent.core.conversation.ConversationRequest;
 import com.javacodeagent.core.conversation.ConversationResponse;
 import com.javacodeagent.core.llm.LLMClient;
 import com.javacodeagent.core.llm.LLMStreamChunk;
+import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.LLMResponse;
 import com.javacodeagent.core.model.ToolCall;
+import com.javacodeagent.core.model.ToolExecutionResult;
+import com.javacodeagent.core.tool.Tool;
+import com.javacodeagent.piagent.abort.AbortRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.TestPropertySource;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -22,6 +28,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -259,5 +267,122 @@ class AgenticLoopIntegrationTest {
             .as("failure must be surfaced explicitly, not disguised as an assistant reply")
             .contains("LLM request failed")
             .contains("503");
+    }
+
+    // ------------------------------------------------------------------
+    // 场景 6：工具要求终止（terminate）
+    // ------------------------------------------------------------------
+
+    /**
+     * 工具返回 {@code terminate=true} 时循环必须立刻停止。
+     *
+     * <p>断言的关键是 {@code verify(chat, times(1))}：mock 被设成永远返回工具调用，
+     * 所以如果 terminate 没有被读取，循环会一路撞到 maxToolCallDepth（本测试配置为 3），
+     * 结果文本变成 "Maximum tool call depth"。两种行为的差别非常明显，
+     * 不会因为断言写得宽松而蒙混过关。
+     */
+    @Test
+    void processMessage_toolRequestsTermination_stopsImmediatelyAndReturnsToolOutput() {
+        ToolCall exitPlan = ToolCall.builder()
+            .id("plan-1")
+            .name("ExitPlanMode")
+            .input(Map.of(
+                "plan", "Refactor the response parser",
+                "steps", List.of("Extract the lexer", "Add regression tests")))
+            .build();
+
+        LLMResponse alwaysCallsTool = LLMResponse.builder()
+            .id("resp-plan")
+            .content("Here is my plan.")
+            .toolCalls(List.of(exitPlan))
+            .stopReason("tool_use")
+            .build();
+        when(llmClient.chat(any())).thenReturn(Mono.just(alwaysCallsTool));
+
+        ConversationRequest req = ConversationRequest.builder()
+            .conversationId(UUID.randomUUID().toString())
+            .content("Plan the refactor")
+            .userId("user-terminate")
+            .build();
+
+        ConversationResponse resp = conversationManager.processMessage(req).block();
+
+        assertThat(resp).isNotNull();
+        assertThat(resp.getContent())
+            .as("the terminating tool's output is the last thing the user sees, "
+              + "so it must be carried into the response")
+            .contains("Here is my plan.")
+            .contains("Extract the lexer")
+            .contains("Add regression tests");
+        assertThat(resp.getContent()).doesNotContain("Maximum tool call depth");
+
+        verify(llmClient, times(1)).chat(any());
+    }
+
+    // ------------------------------------------------------------------
+    // 场景 7：执行途中被中止
+    // ------------------------------------------------------------------
+
+    /**
+     * 用户在工具执行期间按下停止：当前批次跑完，但不再发起新一轮 LLM 调用。
+     *
+     * <p>同样用 {@code times(1)} 与深度超限区分——mock 永远返回工具调用，
+     * 中止若没生效就会走到第 3 轮。
+     */
+    @Test
+    void processMessage_abortedDuringToolExecution_stopsBeforeNextLlmCall() {
+        ToolCall stopCall = ToolCall.builder()
+            .id("stop-1")
+            .name("PressStop")
+            .input(Map.of())
+            .build();
+
+        LLMResponse alwaysCallsTool = LLMResponse.builder()
+            .id("resp-abort")
+            .content("")
+            .toolCalls(List.of(stopCall))
+            .stopReason("tool_use")
+            .build();
+        when(llmClient.chat(any())).thenReturn(Mono.just(alwaysCallsTool));
+
+        ConversationRequest req = ConversationRequest.builder()
+            .conversationId(UUID.randomUUID().toString())
+            .content("Do something long")
+            .userId("user-abort")
+            .build();
+
+        ConversationResponse resp = conversationManager.processMessage(req).block();
+
+        assertThat(resp).isNotNull();
+        assertThat(resp.getContent()).containsIgnoringCase("aborted");
+        assertThat(resp.getContent()).doesNotContain("Maximum tool call depth");
+
+        verify(llmClient, times(1)).chat(any());
+    }
+
+    /**
+     * 模拟"用户在工具执行到一半时点了停止按钮"。
+     *
+     * <p>真实场景里中止来自另一个 HTTP 请求，与对话不在同一调用栈上；
+     * 用一个从工具内部调用 {@link AbortRegistry#abort} 的测试工具，
+     * 能在不引入时序竞争的前提下走通完全相同的代码路径。
+     */
+    @TestConfiguration
+    static class AbortingToolConfig {
+
+        @Bean
+        Tool pressStopTool(AbortRegistry abortRegistry) {
+            return new Tool() {
+                @Override public String getName() { return "PressStop"; }
+                @Override public String getDescription() { return "test-only: aborts the conversation"; }
+                @Override public Map<String, Object> getParameterSchema() { return Map.of("type", "object"); }
+
+                @Override
+                public ToolExecutionResult execute(Map<String, Object> input, ExecutionContext context) {
+                    abortRegistry.abort(context.getConversationId(), "user pressed stop");
+                    return ToolExecutionResult.success("stop requested");
+                }
+            };
+        }
     }
 }

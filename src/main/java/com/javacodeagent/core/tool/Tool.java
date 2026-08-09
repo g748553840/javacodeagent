@@ -5,6 +5,7 @@ import com.javacodeagent.core.model.ExecutionContext;
 import com.javacodeagent.core.model.ToolDefinition;
 import com.javacodeagent.core.model.ToolExecutionResult;
 import com.javacodeagent.piagent.tool.AbortSignal;
+import com.javacodeagent.piagent.tool.ToolExecutionMode;
 import com.javacodeagent.piagent.tool.ToolUpdateCallback;
 
 import java.util.Map;
@@ -47,6 +48,17 @@ public interface Tool {
      */
     default Map<String, Object> prepareArguments(Map<String, Object> raw) {
         return raw;
+    }
+
+    /**
+     * 执行模式。
+     *
+     * <p>返回 {@code null}（默认）表示继承全局策略。声明
+     * {@link ToolExecutionMode#SEQUENTIAL} 的工具会让**整批**调用退化为串行执行——
+     * 用于会修改共享状态、并行执行会产生竞态的工具（如 {@code git commit}）。
+     */
+    default ToolExecutionMode getExecutionMode() {
+        return null;
     }
 
     /**
